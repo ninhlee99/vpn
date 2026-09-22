@@ -83,9 +83,10 @@ export default function App() {
       );
       setActiveProfileId(profile.id);
 
+      // Realistic 2.2s connection loop to show the rotating 2.0s border animation
       setTimeout(() => {
         setConnectionState('connected');
-      }, 800);
+      }, 2200);
     }
   };
 
@@ -198,7 +199,7 @@ export default function App() {
         )}
 
         {/* Minimalist Bottom-Left Quick Trigger for Swift Single Binary Code */}
-        <div className="absolute bottom-4 left-4 z-20">
+        <div className="absolute bottom-4 left-4 z-20 flex items-center gap-3">
           <button
             id="btn-open-swift-code"
             onClick={() => setIsCodeModalOpen(true)}
@@ -206,6 +207,63 @@ export default function App() {
           >
             <Code2 className="w-4 h-4 text-cyan-400" />
             <span>Xem mã nguồn Swift (1 Binary)</span>
+          </button>
+        </div>
+
+        {/* Live Interactive Animation State Switcher */}
+        <div className="absolute bottom-4 right-4 z-20 hidden md:flex items-center gap-1.5 p-1.5 rounded-xl bg-[#12161f]/95 border border-white/10 shadow-2xl backdrop-blur-md text-[11px]">
+          <span className="text-slate-400 px-2 font-medium">Mô phỏng hiệu ứng:</span>
+          <button
+            onClick={() => {
+              setConnectionState('connecting');
+              setIsPopoverOpen(true);
+            }}
+            className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              connectionState === 'connecting'
+                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            🟠 Connecting (Viền xoay 2s)
+          </button>
+          <button
+            onClick={() => {
+              setConnectionState('connected');
+              setIsPopoverOpen(true);
+            }}
+            className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              connectionState === 'connected'
+                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-[0_0_10px_rgba(16,185,129,0.3)]'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            🟢 Connected (Xung nhịp)
+          </button>
+          <button
+            onClick={() => {
+              setConnectionState('reconnecting');
+              setIsPopoverOpen(true);
+            }}
+            className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              connectionState === 'reconnecting'
+                ? 'bg-red-500/20 text-red-300 border border-red-500/40 shadow-[0_0_10px_rgba(239,68,68,0.3)]'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            🔴 Reconnecting
+          </button>
+          <button
+            onClick={() => {
+              setConnectionState('disconnected');
+              setIsPopoverOpen(true);
+            }}
+            className={`px-2.5 py-1 rounded-lg font-medium transition-all ${
+              connectionState === 'disconnected'
+                ? 'bg-slate-700/50 text-slate-200 border border-slate-600'
+                : 'text-slate-400 hover:text-white hover:bg-white/5'
+            }`}
+          >
+            ⚪ Disconnected
           </button>
         </div>
       </div>
