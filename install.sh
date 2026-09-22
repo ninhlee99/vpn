@@ -4,7 +4,21 @@
 # don't need `sudo` on every invocation.
 set -euo pipefail
 
-if ! command -v go >/dev/null 2>&1; then
+# `command -v go` only checks that *something* named `go` is on PATH — on
+# a machine using asdf/mise, that's just a shim that fails at run time if
+# no Go version is actually configured, which command -v can't detect.
+# Actually invoke `go version` to know it's really usable.
+if ! go version >/dev/null 2>&1; then
+  if command -v go >/dev/null 2>&1; then
+    echo "Found 'go' on PATH but it doesn't run — this usually means a Go" >&2
+    echo "version manager (asdf/mise) has no version selected. Output:" >&2
+    echo >&2
+    go version >&2 || true
+    echo >&2
+    echo "Fix your Go version manager (e.g. 'asdf set golang <version>' or" >&2
+    echo "'mise use go@<version>' in this directory), then re-run install.sh." >&2
+    exit 1
+  fi
   echo "Go not found, installing..."
   if ! command -v brew >/dev/null 2>&1; then
     echo "Homebrew not found, installing it first..."
@@ -22,7 +36,10 @@ VERSION="$(git describe --tags --always --dirty 2>/dev/null || echo 1.0.0)"
 OWNER_UID="$(id -u)"
 
 echo "Building vpn ($VERSION)..."
-go build -ldflags "-X main.version=$VERSION -X main.sourceDir=$SRC_DIR -X main.allowedUID=$OWNER_UID" -o /tmp/vpn-build ./cmd/vpn
+# -trimpath: don't embed this machine's build path in the binary.
+# -s -w: strip debug symbols/DWARF — smaller binary, nothing a release
+# build needs to ship with.
+go build -trimpath -ldflags "-s -w -X main.version=$VERSION -X main.sourceDir=$SRC_DIR -X main.allowedUID=$OWNER_UID" -o /tmp/vpn-build ./cmd/vpn
 sudo mv /tmp/vpn-build /usr/local/bin/vpn
 sudo chown root:wheel /usr/local/bin/vpn
 sudo chmod 4755 /usr/local/bin/vpn

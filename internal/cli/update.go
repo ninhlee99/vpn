@@ -58,8 +58,8 @@ func cmdUpdate(args []string) error {
 	version := gitVersion(SourceDir)
 	fmt.Printf("Building %s...\n", version)
 	buildOut := filepath.Join(os.TempDir(), "vpn-update-build")
-	ldflags := fmt.Sprintf("-X main.version=%s -X main.sourceDir=%s -X main.allowedUID=%s", version, SourceDir, AllowedUID)
-	if out, err := runIn(SourceDir, "go", "build", "-ldflags", ldflags, "-o", buildOut, "./cmd/vpn"); err != nil {
+	ldflags := fmt.Sprintf("-s -w -X main.version=%s -X main.sourceDir=%s -X main.allowedUID=%s", version, SourceDir, AllowedUID)
+	if out, err := runIn(SourceDir, "go", "build", "-trimpath", "-ldflags", ldflags, "-o", buildOut, "./cmd/vpn"); err != nil {
 		fmt.Print(out)
 		return fmt.Errorf("build failed: %w", err)
 	}
