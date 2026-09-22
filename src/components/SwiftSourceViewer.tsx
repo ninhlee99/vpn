@@ -537,17 +537,11 @@ struct MenuBarPopupView: View {
 
             Divider().background(Color.white.opacity(0.08)).padding(.top, 12)
 
-            // Footer Bar
+            // Footer Bar (Clean, NO Settings button)
             HStack {
-                Button(action: { showingSettingsModal = true }) {
-                    HStack(spacing: 5) {
-                        Image(systemName: "gearshape")
-                        Text("Cài đặt...").font(.system(size: 12))
-                        Text("⌘,").font(.system(size: 10)).foregroundColor(Color.gray.opacity(0.6))
-                    }
-                    .foregroundColor(Color(red: 0.7, green: 0.74, blue: 0.8))
-                }
-                .buttonStyle(.plain)
+                Text("TMS-VPN Client")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.gray.opacity(0.7))
 
                 Spacer()
 
@@ -572,13 +566,10 @@ struct MenuBarPopupView: View {
         .sheet(item: $editingProfile) { prof in
             ProfileFormSheet(isPresented: Binding(get: { editingProfile != nil }, set: { if !$0 { editingProfile = nil } }), initialProfile: prof)
         }
-        .sheet(isPresented: $showingSettingsModal) {
-            SettingsSheet(isPresented: $showingSettingsModal)
-        }
     }
 }
 
-// MARK: - Add / Edit Profile Sheet (Polished Dark Theme)
+// MARK: - Add / Edit Profile Sheet (Polished Dark Theme with Native Switch Toggle)
 
 struct ProfileFormSheet: View {
     @Binding var isPresented: Bool
@@ -651,11 +642,23 @@ struct ProfileFormSheet: View {
                     .textFieldStyle(CustomDarkTextFieldStyle())
             }
 
-            Toggle("Gửi toàn bộ lưu lượng qua VPN (Send all traffic)", isOn: $isFullTunnel)
-                .font(.system(size: 12))
-                .foregroundColor(Color(red: 0.85, green: 0.88, blue: 0.92))
-                .toggleStyle(CheckboxToggleStyle())
-                .padding(.top, 2)
+            // macOS Native Switch Toggle
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Gửi toàn bộ lưu lượng qua VPN (Send all traffic)")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.85, green: 0.88, blue: 0.92))
+                    Text("Định tuyến 100% traffic mạng qua đường hầm bảo mật")
+                        .font(.system(size: 10))
+                        .foregroundColor(Color.gray)
+                }
+                Spacer()
+                Toggle("", isOn: $isFullTunnel)
+                    .toggleStyle(SwitchToggleStyle(tint: Color(red: 0.2, green: 0.85, blue: 0.95)))
+                    .labelsHidden()
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.04)))
 
             HStack(spacing: 10) {
                 Spacer()
@@ -695,119 +698,6 @@ struct ProfileFormSheet: View {
                 user = p.username
                 isFullTunnel = p.isFullTunnel
             }
-        }
-    }
-}
-
-// MARK: - Settings / Diagnostics Sheet
-
-struct SettingsSheet: View {
-    @Binding var isPresented: Bool
-    @ObservedObject var vpn = VPNManager.shared
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("Cài Đặt & Chẩn Đoán")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.white)
-                Spacer()
-                Button(action: { isPresented = false }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundColor(Color.gray.opacity(0.7))
-                        .font(.system(size: 16))
-                }
-                .buttonStyle(.plain)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("THÔNG TIN HỆ THỐNG")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Color(red: 0.52, green: 0.58, blue: 0.66))
-
-                VStack(spacing: 6) {
-                    InfoRow(label: "CLI Engine", value: "/usr/local/bin/vpn")
-                    InfoRow(label: "Trạng thái", value: vpn.currentPhase)
-                    if !vpn.currentIP.isEmpty {
-                        InfoRow(label: "IP Nội bộ", value: vpn.currentIP)
-                    }
-                    if !vpn.currentTunDevice.isEmpty {
-                        InfoRow(label: "Giao diện ảo", value: vpn.currentTunDevice)
-                    }
-                }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.04)))
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("CÔNG CỤ KHẮC PHỤC SỰ CỐ")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Color(red: 0.52, green: 0.58, blue: 0.66))
-
-                HStack(spacing: 10) {
-                    Button(action: { vpn.repairNetwork() }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "wrench.and.screwdriver")
-                            Text("Khôi phục mạng (Repair)")
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.08)))
-                    }
-                    .buttonStyle(.plain)
-
-                    Button(action: {
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            let task = Process()
-                            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                            task.arguments = ["-a", "Terminal", "/usr/local/bin/vpn", "logs"]
-                            try? task.run()
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "doc.text.magnifyingglass")
-                            Text("Xem nhật ký (Logs)")
-                        }
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(red: 0.05, green: 0.16, blue: 0.22)))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-
-            HStack {
-                Spacer()
-                Button("Đóng") {
-                    isPresented = false
-                }
-                .buttonStyle(PrimaryButtonStyle())
-            }
-            .padding(.top, 6)
-        }
-        .padding(22)
-        .frame(width: 380)
-        .background(Color(red: 0.09, green: 0.11, blue: 0.15))
-    }
-}
-
-struct InfoRow: View {
-    var label: String
-    var value: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundColor(Color.gray)
-            Spacer()
-            Text(value)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.white)
         }
     }
 }

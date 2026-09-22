@@ -7,7 +7,6 @@ interface MacOSMenuBarProps {
   onTogglePopover: () => void;
   connectionState: ConnectionState;
   activeProfileName: string | null;
-  onOpenSettings: () => void;
   onOpenAddModal?: () => void;
   onQuitApp?: () => void;
 }
@@ -17,7 +16,6 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
   onTogglePopover,
   connectionState,
   activeProfileName,
-  onOpenSettings,
   onOpenAddModal,
   onQuitApp
 }) => {
@@ -54,37 +52,45 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
     switch (connectionState) {
       case 'connected':
         return (
-          <div className="relative flex items-center justify-center">
-            <ShieldCheck className="w-[16px] h-[16px] text-emerald-400 fill-emerald-400/25 filter drop-shadow-[0_0_4px_rgba(52,211,153,0.4)]" />
-            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399] border border-[#161a22]" />
+          <div className="relative p-1 rounded-lg border border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] animate-pulse bg-emerald-950/50 flex items-center justify-center">
+            <ShieldCheck className="w-[15px] h-[15px] text-emerald-400 fill-emerald-400/30 filter drop-shadow-[0_0_4px_rgba(52,211,153,0.6)]" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
           </div>
         );
       case 'connecting':
         return (
-          <div className="relative flex items-center justify-center animate-pulse">
-            <Shield className="w-[16px] h-[16px] text-amber-400 fill-amber-400/25" />
-            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24] border border-[#161a22]" />
+          <div className="relative p-[1.5px] rounded-lg overflow-hidden flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
+            {/* Orange linear border with animate-spin-slow */}
+            <div className="absolute -inset-[150%] animate-spin-slow bg-[conic-gradient(from_0deg,transparent_0_260deg,#f59e0b_310deg,#fbbf24_360deg)]" />
+            <div className="relative rounded-[6px] bg-[#161a22] p-1 flex items-center justify-center">
+              <Shield className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30 animate-pulse" />
+              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24]" />
+            </div>
           </div>
         );
       case 'reconnecting':
         return (
-          <div className="relative flex items-center justify-center">
-            <ShieldAlert className="w-[16px] h-[16px] text-amber-400 fill-amber-400/25 animate-pulse" />
-            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500 shadow-[0_0_6px_#f59e0b] border border-[#161a22]" />
+          <div className="relative p-[1.5px] rounded-lg overflow-hidden flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
+            {/* Orange linear border with animate-spin-slow */}
+            <div className="absolute -inset-[150%] animate-spin-slow bg-[conic-gradient(from_0deg,transparent_0_260deg,#f59e0b_310deg,#fbbf24_360deg)]" />
+            <div className="relative rounded-[6px] bg-[#161a22] p-1 flex items-center justify-center">
+              <ShieldAlert className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30 animate-pulse" />
+              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500 shadow-[0_0_6px_#f59e0b]" />
+            </div>
           </div>
         );
       case 'error':
         return (
-          <div className="relative flex items-center justify-center">
-            <ShieldAlert className="w-[16px] h-[16px] text-rose-400 fill-rose-400/25" />
-            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-rose-500 shadow-[0_0_6px_#f43f5e] border border-[#161a22]" />
+          <div className="relative p-1 rounded-lg border border-rose-500/80 shadow-[0_0_8px_rgba(244,63,94,0.4)] bg-rose-950/40 flex items-center justify-center">
+            <ShieldAlert className="w-[15px] h-[15px] text-rose-400 fill-rose-400/25" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-rose-500 shadow-[0_0_6px_#f43f5e]" />
           </div>
         );
       case 'disconnected':
       default:
         return (
-          <div className="relative flex items-center justify-center">
-            <Shield className="w-[16px] h-[16px] text-slate-300/80 hover:text-white transition-colors" />
+          <div className="relative p-1 rounded-lg flex items-center justify-center">
+            <Shield className="w-[15px] h-[15px] text-slate-300/80 group-hover:text-white transition-colors" />
           </div>
         );
     }
@@ -110,15 +116,15 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
           </button>
           {activeMenu === 'apple' && (
             <div className="absolute top-8 left-0 w-56 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
-              <div className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer">
+              <div
+                onClick={() => setActiveMenu(null)}
+                className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer"
+              >
                 Giới thiệu về máy Mac này
               </div>
               <div className="my-1 border-t border-white/10" />
               <div
-                onClick={() => {
-                  setActiveMenu(null);
-                  onOpenSettings();
-                }}
+                onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
               >
                 <span>Cài đặt hệ thống...</span>
@@ -138,29 +144,13 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
             TMS-VPN
           </button>
           {activeMenu === 'app' && (
-            <div className="absolute top-8 left-0 w-60 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
+            <div className="absolute top-8 left-0 w-56 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
               <div
                 onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center gap-2"
               >
                 <Info className="w-3.5 h-3.5 opacity-70" />
                 <span>Giới thiệu TMS-VPN</span>
-              </div>
-              <div className="my-1 border-t border-white/10" />
-              {/* Settings Item */}
-              <div
-                id="menu-item-settings"
-                onClick={() => {
-                  setActiveMenu(null);
-                  onOpenSettings();
-                }}
-                className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between font-medium"
-              >
-                <div className="flex items-center gap-2">
-                  <Settings className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Cài đặt...</span>
-                </div>
-                <span className="text-[12px] opacity-60">⌘,</span>
               </div>
               <div className="my-1 border-t border-white/10" />
               <div
@@ -239,16 +229,6 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 <span>Bảng điều khiển Menu Bar</span>
                 <span className="text-[12px] opacity-60">⌘1</span>
               </div>
-              <div
-                onClick={() => {
-                  setActiveMenu(null);
-                  onOpenSettings();
-                }}
-                className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
-              >
-                <span>Cài đặt & Tùy chọn...</span>
-                <span className="text-[12px] opacity-60">⌘,</span>
-              </div>
             </div>
           )}
         </div>
@@ -283,7 +263,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
         <button
           id="menubar-tms-vpn-trigger"
           onClick={onTogglePopover}
-          className={`flex items-center justify-center p-1.5 rounded-md transition-all ${
+          className={`group flex items-center justify-center p-0.5 rounded-lg transition-all ${
             isPopoverOpen
               ? 'bg-white/20 text-white shadow-inner ring-1 ring-white/20'
               : 'hover:bg-white/10 text-slate-200'
