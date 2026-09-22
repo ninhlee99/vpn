@@ -11,12 +11,7 @@ import (
 	"vpn/internal/keychain"
 	"vpn/internal/privilege"
 	"vpn/internal/state"
-	"vpn/internal/vpnlog"
 )
-
-// legacyStateDir is where state.Dir lived before the project was renamed
-// from vpn-l2tp to vpn — cleaned up here too so a rename never strands it.
-const legacyStateDir = "/var/run/vpn-l2tp"
 
 func cmdUninstall(args []string) error {
 	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
@@ -56,9 +51,7 @@ func cmdUninstall(args []string) error {
 	}
 
 	// The user's own config dir (~/.config/vpn) — unprivileged, it's in
-	// their own home directory. config.Dir also migrates a pre-rename
-	// ~/.config/vpn-l2tp into place first if found, so this always ends
-	// up removing whichever one actually has the data.
+	// their own home directory.
 	if dir, err := config.Dir(); err == nil {
 		if err := os.RemoveAll(dir); err != nil {
 			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", dir, err)
@@ -70,11 +63,9 @@ func cmdUninstall(args []string) error {
 		if err := os.RemoveAll(state.Dir); err != nil {
 			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", state.Dir, err)
 		}
-		_ = os.RemoveAll(legacyStateDir) // pre-rename path, best-effort
 		if err := os.Remove(engine.LogPath()); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", engine.LogPath(), err)
 		}
-		_ = os.Remove(vpnlog.LegacyPath) // pre-rename path, best-effort
 		// Delete the binary itself last — safe on Unix even though it's
 		// the file this running process's own image was exec'd from
 		// (removing a directory entry doesn't touch an already-open/

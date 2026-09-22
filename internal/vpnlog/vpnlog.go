@@ -15,11 +15,6 @@ import (
 
 const Path = "/var/log/vpn.log"
 
-// LegacyPath is where this log lived before the project was renamed from
-// vpn-l2tp to vpn — `vpn uninstall` also removes it, so a rename doesn't
-// strand an orphaned log file behind.
-const LegacyPath = "/var/log/vpn-l2tp.log"
-
 var logger *log.Logger
 var verbose bool
 
