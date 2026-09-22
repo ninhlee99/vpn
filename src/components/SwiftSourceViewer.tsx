@@ -105,6 +105,8 @@ final class VPNManager: ObservableObject {
     @Published var currentIP: String = ""
     @Published var currentTunDevice: String = ""
     @Published var errorMessage: String?
+    @Published var isStaleSession: Bool = false
+    @Published var autoRetryCountdown: Int = 0
 
     // Settings
     @Published var autoConnectOnLaunch: Bool = false
@@ -112,6 +114,7 @@ final class VPNManager: ObservableObject {
 
     var onStatusChanged: ((String) -> Void)?
     private var pollTimer: Timer?
+    private var retryTimer: Timer?
 
     private var configURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -152,9 +155,34 @@ final class VPNManager: ObservableObject {
             localIP = st.local_ip ?? ""
             tunDev = st.tun_device ?? ""
             if phase == "FAILED" {
-                self.errorMessage = "\(st.fail_stage ?? "Lỗi"): \(st.fail_detail ?? "")"
+                let stage = st.fail_stage ?? ""
+                let detail = st.fail_detail ?? ""
+                
+                if detail.contains("already logged in") || detail.contains("You are already logged in") {
+                    self.errorMessage = "Tài khoản đang có phiên đăng nhập trên server ('Already logged in')."
+                    self.isStaleSession = true
+                    if self.autoRetryCountdown == 0 && self.retryTimer == nil && self.activeProfileName != nil {
+                        self.startAutoRetry(profileName: self.activeProfileName!)
+                    }
+                } else if stage == "PPP_AUTH_FAILURE" {
+                    self.errorMessage = "Xác thực PPP thất bại: Sai tên tài khoản hoặc mật khẩu."
+                    self.isStaleSession = false
+                } else if stage == "IKE_FAILED" || stage.contains("IKE") {
+                    self.errorMessage = "Lỗi bắt tay IPsec IKE: Sai IP máy chủ hoặc sai Pre-shared Key (PSK)."
+                    self.isStaleSession = false
+                } else if stage == "ROUTE_FAILURE" {
+                    self.errorMessage = "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair)."
+                    self.isStaleSession = false
+                } else {
+                    self.errorMessage = "\(stage.isEmpty ? "Lỗi kết nối" : stage): \(detail)"
+                    self.isStaleSession = false
+                }
             } else {
-                self.errorMessage = nil
+                if phase == "CONNECTED" || phase == "CONNECTING" {
+                    self.errorMessage = nil
+                    self.isStaleSession = false
+                    self.cancelAutoRetry()
+                }
             }
         }
 
@@ -202,6 +230,28 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    func startAutoRetry(profileName: String) {
+        self.cancelAutoRetry()
+        self.autoRetryCountdown = 5
+        self.retryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+            Task { @MainActor in
+                guard let self = self else { timer.invalidate(); return }
+                if self.autoRetryCountdown > 1 {
+                    self.autoRetryCountdown -= 1
+                } else {
+                    self.cancelAutoRetry()
+                    self.cleanupAndForceConnect(profileName: profileName)
+                }
+            }
+        }
+    }
+
+    func cancelAutoRetry() {
+        self.retryTimer?.invalidate()
+        self.retryTimer = nil
+        self.autoRetryCountdown = 0
+    }
+
     func toggleConnect(profile: VPNProfileItem) {
         if profile.isConnected || profile.isConnecting {
             disconnect()
@@ -211,13 +261,22 @@ final class VPNManager: ObservableObject {
     }
 
     func connect(profileName: String) {
+        cancelAutoRetry()
         self.isConnecting = true
         self.currentPhase = "CONNECTING"
         self.activeProfileName = profileName
         self.errorMessage = nil
+        self.isStaleSession = false
         self.onStatusChanged?("CONNECTING")
 
         DispatchQueue.global(qos: .userInitiated).async {
+            // Pre-flight cleanup of old stale processes
+            let pKill = Process()
+            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            pKill.arguments = ["-9", "vpn"]
+            try? pKill.run()
+            pKill.waitUntilExit()
+
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
             task.arguments = ["connect", "--profile", profileName]
@@ -225,9 +284,56 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    func cleanupAndForceConnect(profileName: String) {
+        cancelAutoRetry()
+        self.isConnecting = true
+        self.currentPhase = "CONNECTING"
+        self.activeProfileName = profileName
+        self.errorMessage = "Đang dọn dẹp phiên cũ & kết nối lại..."
+        self.onStatusChanged?("CONNECTING")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // 1. Force kill any stale processes
+            let pKill = Process()
+            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+            pKill.arguments = ["-9", "vpn"]
+            try? pKill.run()
+            pKill.waitUntilExit()
+
+            // 2. Disconnect and repair routing
+            let pDisc = Process()
+            pDisc.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            pDisc.arguments = ["disconnect"]
+            try? pDisc.run()
+            pDisc.waitUntilExit()
+
+            let pRep = Process()
+            pRep.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            pRep.arguments = ["repair"]
+            try? pRep.run()
+            pRep.waitUntilExit()
+
+            // 3. Small pause to allow server RADIUS session cleanup
+            Thread.sleep(forTimeInterval: 1.2)
+
+            // 4. Connect again
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            task.arguments = ["connect", "--profile", profileName]
+            try? task.run()
+
+            Task { @MainActor in
+                self?.syncFromDisk()
+            }
+        }
+    }
+
     func disconnect() {
+        cancelAutoRetry()
         self.isConnecting = false
         self.isConnected = false
+        self.isStaleSession = false
+        self.errorMessage = nil
         self.currentPhase = "DISCONNECTED"
         self.onStatusChanged?("DISCONNECTED")
 
@@ -240,6 +346,7 @@ final class VPNManager: ObservableObject {
     }
 
     func repairNetwork() {
+        cancelAutoRetry()
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
@@ -293,9 +400,7 @@ final class VPNManager: ObservableObject {
 
 // MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60/120fps)
 
-struct RotatingLinearBorder: View {
-    var isConnecting: Bool
-    var isConnected: Bool
+struct ConnectingLinearBorder: View {
     var cornerRadius: CGFloat = 13
     @State private var rotation: Double = 0
 
@@ -303,23 +408,44 @@ struct RotatingLinearBorder: View {
         RoundedRectangle(cornerRadius: cornerRadius)
             .stroke(
                 AngularGradient(
-                    gradient: Gradient(colors: isConnecting
-                        ? [Color.clear, Color.clear, Color.orange.opacity(0.2), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
-                        : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.2), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
-                    ),
+                    gradient: Gradient(colors: [
+                        Color.clear,
+                        Color.clear,
+                        Color.orange.opacity(0.15),
+                        Color.orange,
+                        Color(red: 1.0, green: 0.9, blue: 0.6)
+                    ]),
                     center: .center,
                     startAngle: .degrees(rotation),
                     endAngle: .degrees(rotation + 360)
                 ),
                 lineWidth: 2
             )
-            .shadow(
-                color: isConnecting ? Color.orange.opacity(0.55) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.55),
-                radius: 7
-            )
+            .shadow(color: Color.orange.opacity(0.6), radius: 8)
             .onAppear {
                 withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
                     rotation = 360
+                }
+            }
+    }
+}
+
+// MARK: - Connected Green Pulse Border (SwiftUI Native)
+
+struct ConnectedPulseBorder: View {
+    var cornerRadius: CGFloat = 13
+    @State private var isPulsing = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.8)
+            .shadow(
+                color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.75 : 0.25),
+                radius: isPulsing ? 10 : 4
+            )
+            .onAppear {
+                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                    isPulsing = true
                 }
             }
     }
@@ -441,8 +567,10 @@ struct ProfileCardRow: View {
                         (profile.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.1, green: 0.12, blue: 0.16).opacity(0.85))
                     )
 
-                if profile.isConnected || profile.isConnecting {
-                    RotatingLinearBorder(isConnecting: profile.isConnecting, isConnected: profile.isConnected, cornerRadius: 13)
+                if profile.isConnecting {
+                    ConnectingLinearBorder(cornerRadius: 13)
+                } else if profile.isConnected {
+                    ConnectedPulseBorder(cornerRadius: 13)
                 } else {
                     RoundedRectangle(cornerRadius: 13)
                         .stroke(Color.white.opacity(0.08), lineWidth: 1)
@@ -468,8 +596,10 @@ struct MenuBarPopupView: View {
                             (vpn.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.05, green: 0.16, blue: 0.22))
                         )
 
-                    if vpn.isConnected || vpn.isConnecting {
-                        RotatingLinearBorder(isConnecting: vpn.isConnecting, isConnected: vpn.isConnected, cornerRadius: 12)
+                    if vpn.isConnecting {
+                        ConnectingLinearBorder(cornerRadius: 12)
+                    } else if vpn.isConnected {
+                        ConnectedPulseBorder(cornerRadius: 12)
                     } else {
                         RoundedRectangle(cornerRadius: 12)
                             .stroke(Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 1)
@@ -515,6 +645,47 @@ struct MenuBarPopupView: View {
             .padding(.bottom, 12)
 
             Divider().background(Color.white.opacity(0.08))
+
+            // Active Connection Info Banner when connected
+            if vpn.isConnected {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("ĐANG HOẠT ĐỘNG")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.55))
+                        HStack(spacing: 8) {
+                            if !vpn.currentIP.isEmpty {
+                                Text("IP: \(vpn.currentIP)")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.white)
+                            }
+                            if !vpn.currentTunDevice.isEmpty {
+                                Text("(\(vpn.currentTunDevice))")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                    }
+                    Spacer()
+                    Button(action: { vpn.disconnect() }) {
+                        Text("Ngắt kết nối")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(Color.red.opacity(0.9))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.red.opacity(0.12))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color(red: 0.04, green: 0.15, blue: 0.1))
+
+                Divider().background(Color.white.opacity(0.08))
+            }
 
             // Subheader: Profile List Header
             HStack {
@@ -576,19 +747,76 @@ struct MenuBarPopupView: View {
                 .padding(.horizontal, 16)
             }
 
-            // Error notice if any
+            // Error or Stale Session Notice
             if let err = vpn.errorMessage {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                        .font(.system(size: 12))
-                    Text(err)
-                        .font(.system(size: 11))
-                        .foregroundColor(.orange)
-                        .lineLimit(2)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: vpn.isStaleSession ? "clock.arrow.circlepath" : "exclamationmark.triangle.fill")
+                            .foregroundColor(vpn.isStaleSession ? Color.orange : Color.orange)
+                            .font(.system(size: 13))
+                            .padding(.top, 1)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(err)
+                                .font(.system(size: 11.5, weight: .medium))
+                                .foregroundColor(vpn.isStaleSession ? Color(red: 1.0, green: 0.85, blue: 0.5) : .orange)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            if vpn.isStaleSession && vpn.autoRetryCountdown > 0 {
+                                Text("Đang dọn dẹp phiên cũ... Tự động thử lại sau \(vpn.autoRetryCountdown)s")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(Color(red: 0.3, green: 0.85, blue: 1.0))
+                            }
+                        }
+                    }
+
+                    if vpn.isStaleSession {
+                        HStack(spacing: 8) {
+                            Button(action: {
+                                vpn.cleanupAndForceConnect(profileName: vpn.activeProfileName ?? "")
+                            }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "arrow.clockwise")
+                                    Text("Dọn dẹp & Thử lại ngay")
+                                }
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .fill(Color.orange.opacity(0.85))
+                                )
+                            }
+                            .buttonStyle(.plain)
+
+                            Button(action: {
+                                vpn.cancelAutoRetry()
+                                vpn.disconnect()
+                            }) {
+                                Text("Hủy")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.gray)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 4)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 2)
+                    }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(vpn.isStaleSession ? Color(red: 0.22, green: 0.14, blue: 0.04) : Color(red: 0.2, green: 0.08, blue: 0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(vpn.isStaleSession ? Color.orange.opacity(0.3) : Color.red.opacity(0.3), lineWidth: 1)
+                        )
+                )
                 .padding(.horizontal, 16)
-                .padding(.top, 6)
+                .padding(.top, 8)
             }
 
             Divider().background(Color.white.opacity(0.08)).padding(.top, 12)
