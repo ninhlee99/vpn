@@ -275,6 +275,23 @@ func runAuth(ctx context.Context, t Transport, username, password string) error 
 				continue
 			}
 		}
+		if proto == ProtoLCP {
+			// The peer can keep retransmitting its own LCP Configure-Request
+			// here if the Ack negotiatePhase sent it back during the LCP
+			// phase never arrived — negotiatePhase itself has already
+			// exited by now, so nothing else acks it. Left unanswered, the
+			// peer's own LCP state machine can stay stuck waiting for that
+			// Ack and never send a CHAP Challenge at all — reproduced live
+			// as an endless "timed out waiting for CHAP Challenge" while
+			// the log showed the peer's identical Configure-Request on
+			// repeat. Keep acking it here too so the peer's LCP actually
+			// converges.
+			if pkt, err := ParseControlPacket(payload); err == nil && pkt.Code == CodeConfigureRequest {
+				reply := ControlPacket{Code: CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
+				_ = t.SendFrame(ProtoLCP, reply.Marshal())
+			}
+			continue
+		}
 		if proto != ProtoCHAP {
 			continue
 		}

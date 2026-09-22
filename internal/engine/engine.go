@@ -343,11 +343,23 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error
 				// during the data phase (negotiatePhase only handles these
 				// while a Configure-Request/-Ack exchange is in flight) —
 				// reply so it doesn't conclude the link died and tear the
-				// session down from its side.
+				// session down from its side. It can also retransmit its
+				// own Configure-Request here if our earlier Ack to it never
+				// arrived (see runAuth's identical handling, which fixed a
+				// live case of this stalling the peer's own LCP state
+				// machine before it would even send a CHAP Challenge) — ack
+				// it here too rather than assuming that can only happen
+				// during auth.
 				pkt, err := ppp.ParseControlPacket(payload)
-				if err == nil && pkt.Code == ppp.CodeEchoRequest {
-					reply := ppp.ControlPacket{Code: ppp.CodeEchoReply, Identifier: pkt.Identifier, Data: pkt.Data}
-					_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
+				if err == nil {
+					switch pkt.Code {
+					case ppp.CodeEchoRequest:
+						reply := ppp.ControlPacket{Code: ppp.CodeEchoReply, Identifier: pkt.Identifier, Data: pkt.Data}
+						_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
+					case ppp.CodeConfigureRequest:
+						reply := ppp.ControlPacket{Code: ppp.CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
+						_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
+					}
 				}
 			}
 			// Other protocols (e.g. IPV6CP, which this client never
