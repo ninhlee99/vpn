@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"vpn/internal/privilege"
@@ -37,8 +38,17 @@ func cmdUpdate(args []string) error {
 	// root. Only the final install step (copying the new binary over
 	// /usr/local/bin/vpn and re-setting the setuid bit) needs it.
 	if _, err := os.Stat(filepath.Join(SourceDir, ".git")); err == nil {
+		branch, err := runIn(SourceDir, "git", "rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return fmt.Errorf("determine current git branch: %w", err)
+		}
+		branch = strings.TrimSpace(branch)
 		fmt.Println("Đang git pull...")
-		out, err := runIn(SourceDir, "git", "pull", "--ff-only")
+		// Explicit "origin <branch>", not a bare `git pull` — that only
+		// works if the local branch has upstream tracking configured,
+		// which isn't guaranteed (e.g. a branch pushed with `git push
+		// origin main` but never `--set-upstream`).
+		out, err := runIn(SourceDir, "git", "pull", "--ff-only", "origin", branch)
 		fmt.Print(out)
 		if err != nil {
 			return fmt.Errorf("git pull thất bại: %w", err)
