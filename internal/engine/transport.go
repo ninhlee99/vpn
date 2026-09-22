@@ -34,8 +34,9 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	binary.BigEndian.PutUint16(udpHdr[0:2], l2tpPort) // src port
 	binary.BigEndian.PutUint16(udpHdr[2:4], l2tpPort) // dst port
 	binary.BigEndian.PutUint16(udpHdr[4:6], uint16(8+len(l2tpMsg)))
-	// checksum (udpHdr[6:8]) left 0 — optional for IPv4 UDP (RFC 768), and
-	// the payload is already integrity-protected by ESP's own ICV.
+	// Checksum remains zero. RFC 3948 §3.1.2 permits this for integrity-
+	// protected UDP transported by ESP: NAT changes the IP addresses used by
+	// a non-zero checksum's pseudo-header and cannot adjust encrypted ESP.
 	payload := append(udpHdr, l2tpMsg...)
 
 	pkt, err := t.out.Encrypt(payload, protoUDP)
