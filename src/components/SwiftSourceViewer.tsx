@@ -45,6 +45,23 @@ struct VPNProfileItem: Identifiable, Hashable {
     var isConnecting: Bool
 }
 
+// MARK: - Error & Alert Models
+
+enum VPNAlertKind {
+    case sessionStale
+    case authFailed
+    case ikeFailed
+    case routeFailed
+    case generic
+}
+
+struct VPNAlertInfo: Equatable {
+    var kind: VPNAlertKind
+    var title: String
+    var message: String
+    var detail: String
+}
+
 // MARK: - Status Bar Icon Generator
 
 func makeMenuBarIcon(phase: String) -> NSImage {
@@ -105,6 +122,7 @@ final class VPNManager: ObservableObject {
     @Published var currentIP: String = ""
     @Published var currentTunDevice: String = ""
     @Published var errorMessage: String?
+    @Published var activeAlert: VPNAlertInfo?
     @Published var isStaleSession: Bool = false
     @Published var autoRetryCountdown: Int = 0
 
@@ -159,27 +177,58 @@ final class VPNManager: ObservableObject {
                 let detail = st.fail_detail ?? ""
                 
                 if detail.contains("already logged in") || detail.contains("You are already logged in") {
-                    self.errorMessage = "Tài khoản đang có phiên đăng nhập trên server ('Already logged in')."
+                    self.activeAlert = VPNAlertInfo(
+                        kind: .sessionStale,
+                        title: "Session Stale",
+                        message: "Tài khoản đang có phiên đăng nhập trên máy chủ ('Already logged in').",
+                        detail: detail
+                    )
+                    self.errorMessage = "Session Stale: Tài khoản đang có phiên đăng nhập trên server."
                     self.isStaleSession = true
                     if self.autoRetryCountdown == 0 && self.retryTimer == nil && self.activeProfileName != nil {
                         self.startAutoRetry(profileName: self.activeProfileName!)
                     }
-                } else if stage == "PPP_AUTH_FAILURE" {
-                    self.errorMessage = "Xác thực PPP thất bại: Sai tên tài khoản hoặc mật khẩu."
+                } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
+                    self.activeAlert = VPNAlertInfo(
+                        kind: .authFailed,
+                        title: "Authentication Failed",
+                        message: "Xác thực PPP/CHAP thất bại: Sai tên tài khoản hoặc mật khẩu.",
+                        detail: detail.isEmpty ? "CHAP authentication rejected by peer" : detail
+                    )
+                    self.errorMessage = "Authentication Failed: Sai tên tài khoản hoặc mật khẩu."
                     self.isStaleSession = false
                 } else if stage == "IKE_FAILED" || stage.contains("IKE") {
-                    self.errorMessage = "Lỗi bắt tay IPsec IKE: Sai IP máy chủ hoặc sai Pre-shared Key (PSK)."
+                    self.activeAlert = VPNAlertInfo(
+                        kind: .ikeFailed,
+                        title: "IKE Handshake Failed",
+                        message: "Lỗi bắt tay IPsec IKE: Sai địa chỉ IP máy chủ hoặc sai Pre-shared Key (PSK).",
+                        detail: detail
+                    )
+                    self.errorMessage = "IKE Handshake Failed: Sai IP máy chủ hoặc sai khóa PSK."
                     self.isStaleSession = false
                 } else if stage == "ROUTE_FAILURE" {
-                    self.errorMessage = "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair)."
+                    self.activeAlert = VPNAlertInfo(
+                        kind: .routeFailed,
+                        title: "Routing Error",
+                        message: "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair).",
+                        detail: detail
+                    )
+                    self.errorMessage = "Routing Error: Lỗi thiết lập định tuyến mạng."
                     self.isStaleSession = false
                 } else {
+                    self.activeAlert = VPNAlertInfo(
+                        kind: .generic,
+                        title: stage.isEmpty ? "Lỗi kết nối" : stage,
+                        message: detail.isEmpty ? "Kết nối thất bại" : detail,
+                        detail: detail
+                    )
                     self.errorMessage = "\(stage.isEmpty ? "Lỗi kết nối" : stage): \(detail)"
                     self.isStaleSession = false
                 }
             } else {
                 if phase == "CONNECTED" || phase == "CONNECTING" {
                     self.errorMessage = nil
+                    self.activeAlert = nil
                     self.isStaleSession = false
                     self.cancelAutoRetry()
                 }
@@ -421,6 +470,81 @@ final class VPNManager: ObservableObject {
             Task { @MainActor in
                 self?.syncFromDisk()
             }
+        }
+    }
+}
+
+// MARK: - MacOSMenuBar Swift Component (Status Bar Icon Border Animation)
+
+struct MacOSMenuBar: View {
+    @ObservedObject var vpn = VPNManager.shared
+    @State private var rotation: Double = 0
+    @State private var isPulsing: Bool = false
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ZStack {
+                if vpn.isConnecting {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(
+                            AngularGradient(
+                                gradient: Gradient(colors: [
+                                    Color.clear,
+                                    Color.clear,
+                                    Color.orange.opacity(0.15),
+                                    Color.orange,
+                                    Color(red: 1.0, green: 0.9, blue: 0.6)
+                                ]),
+                                center: .center,
+                                startAngle: .degrees(rotation),
+                                endAngle: .degrees(rotation + 360)
+                            ),
+                            lineWidth: 1.5
+                        )
+                        .shadow(color: Color.orange.opacity(0.7), radius: 4)
+                        .onAppear {
+                            withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
+                                rotation = 360
+                            }
+                        }
+                } else if vpn.isConnected {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.2)
+                        .shadow(
+                            color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.8 : 0.25),
+                            radius: isPulsing ? 5 : 2
+                        )
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
+                                isPulsing = true
+                            }
+                        }
+                }
+
+                Image(systemName: vpn.isConnected ? "checkmark.shield.fill" : (vpn.isConnecting ? "shield.lefthalf.filled" : "shield"))
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(
+                        vpn.isConnected ? Color(red: 0.2, green: 0.9, blue: 0.6) :
+                        (vpn.isConnecting ? Color.orange : Color.white.opacity(0.9))
+                    )
+
+                if vpn.isConnected {
+                    Circle()
+                        .fill(Color(red: 0.2, green: 0.98, blue: 0.65))
+                        .frame(width: 5, height: 5)
+                        .offset(x: 6, y: -6)
+                } else if vpn.isConnecting {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 5, height: 5)
+                        .offset(x: 6, y: -6)
+                }
+            }
+            .frame(width: 22, height: 22)
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            AppDelegate.shared?.togglePopover(nil)
         }
     }
 }
@@ -774,30 +898,56 @@ struct MenuBarPopupView: View {
                 .padding(.horizontal, 16)
             }
 
-            // Error or Stale Session Notice
-            if let err = vpn.errorMessage {
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: vpn.isStaleSession ? "clock.arrow.circlepath" : "exclamationmark.triangle.fill")
-                            .foregroundColor(vpn.isStaleSession ? Color.orange : Color.orange)
-                            .font(.system(size: 13))
-                            .padding(.top, 1)
+            // Error or Stale Session Notice / Alert Card
+            if let alert = vpn.activeAlert ?? (vpn.errorMessage != nil ? VPNAlertInfo(kind: vpn.isStaleSession ? .sessionStale : .generic, title: vpn.isStaleSession ? "Session Stale" : "Lỗi kết nối", message: vpn.errorMessage ?? "", detail: "") : nil) {
+                VStack(alignment: .leading, spacing: 8) {
+                    // Header Badge & Title
+                    HStack(spacing: 6) {
+                        Image(systemName: alert.kind == .sessionStale ? "clock.arrow.circlepath" : (alert.kind == .authFailed ? "lock.slash.fill" : "exclamationmark.triangle.fill"))
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(alert.kind == .sessionStale ? Color.orange : (alert.kind == .authFailed ? Color(red: 1.0, green: 0.35, blue: 0.35) : Color.yellow))
 
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(err)
-                                .font(.system(size: 11.5, weight: .medium))
-                                .foregroundColor(vpn.isStaleSession ? Color(red: 1.0, green: 0.85, blue: 0.5) : .orange)
-                                .fixedSize(horizontal: false, vertical: true)
+                        Text(alert.title)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundColor(alert.kind == .sessionStale ? Color.orange : (alert.kind == .authFailed ? Color(red: 1.0, green: 0.45, blue: 0.45) : Color.yellow))
 
-                            if vpn.isStaleSession && vpn.autoRetryCountdown > 0 {
-                                Text("Đang dọn dẹp phiên cũ... Tự động thử lại sau \(vpn.autoRetryCountdown)s")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(Color(red: 0.3, green: 0.85, blue: 1.0))
-                            }
+                        Spacer()
+
+                        Text(alert.kind == .sessionStale ? "Phiên tồn đọng" : (alert.kind == .authFailed ? "Lỗi tài khoản" : "Cảnh báo"))
+                            .font(.system(size: 9.5, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                Capsule()
+                                    .fill(alert.kind == .sessionStale ? Color.orange.opacity(0.2) : (alert.kind == .authFailed ? Color.red.opacity(0.2) : Color.yellow.opacity(0.2)))
+                            )
+                            .foregroundColor(alert.kind == .sessionStale ? Color.orange : (alert.kind == .authFailed ? Color(red: 1.0, green: 0.5, blue: 0.5) : Color.yellow))
+                    }
+
+                    // Message & Detail
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(alert.message)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundColor(Color.white.opacity(0.92))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if !alert.detail.isEmpty && alert.detail != alert.message {
+                            Text(alert.detail)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(Color.gray)
+                                .lineLimit(2)
+                        }
+
+                        if alert.kind == .sessionStale && vpn.autoRetryCountdown > 0 {
+                            Text("Đang dọn dẹp tiến trình cũ... Tự động thử lại sau \(vpn.autoRetryCountdown)s")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(Color(red: 0.3, green: 0.85, blue: 1.0))
+                                .padding(.top, 2)
                         }
                     }
 
-                    if vpn.isStaleSession {
+                    // Action Controls
+                    if alert.kind == .sessionStale {
                         HStack(spacing: 8) {
                             Button(action: {
                                 vpn.cleanupAndForceConnect(profileName: vpn.activeProfileName ?? "")
@@ -808,11 +958,11 @@ struct MenuBarPopupView: View {
                                 }
                                 .font(.system(size: 11, weight: .semibold))
                                 .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
                                 .background(
                                     RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color.orange.opacity(0.85))
+                                        .fill(Color.orange.opacity(0.9))
                                 )
                             }
                             .buttonStyle(.plain)
@@ -824,8 +974,43 @@ struct MenuBarPopupView: View {
                                 Text("Hủy")
                                     .font(.system(size: 11))
                                     .foregroundColor(.gray)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 4)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.top, 2)
+                    } else if alert.kind == .authFailed {
+                        HStack(spacing: 8) {
+                            if let actProf = vpn.profiles.first(where: { $0.name == vpn.activeProfileName }) {
+                                Button(action: {
+                                    editingProfile = actProf
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "pencil")
+                                        Text("Chỉnh sửa mật khẩu hồ sơ")
+                                    }
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(Color(red: 0.8, green: 0.25, blue: 0.25))
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            Button(action: {
+                                vpn.errorMessage = nil
+                                vpn.activeAlert = nil
+                            }) {
+                                Text("Bỏ qua")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.gray)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
                             }
                             .buttonStyle(.plain)
                         }
@@ -833,13 +1018,13 @@ struct MenuBarPopupView: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.vertical, 10)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(vpn.isStaleSession ? Color(red: 0.22, green: 0.14, blue: 0.04) : Color(red: 0.2, green: 0.08, blue: 0.08))
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(alert.kind == .sessionStale ? Color(red: 0.22, green: 0.14, blue: 0.04) : (alert.kind == .authFailed ? Color(red: 0.24, green: 0.07, blue: 0.07) : Color(red: 0.18, green: 0.12, blue: 0.05)))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(vpn.isStaleSession ? Color.orange.opacity(0.3) : Color.red.opacity(0.3), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(alert.kind == .sessionStale ? Color.orange.opacity(0.4) : (alert.kind == .authFailed ? Color.red.opacity(0.4) : Color.yellow.opacity(0.3)), lineWidth: 1)
                         )
                 )
                 .padding(.horizontal, 16)
