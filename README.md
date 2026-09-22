@@ -1,4 +1,4 @@
-# vpn-l2tp
+# vpn
 
 VPN client L2TP/IPsec thuần macOS.
 

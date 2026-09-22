@@ -12,7 +12,13 @@ import (
 	"strings"
 )
 
-const servicePrefix = "vpn-l2tp"
+const servicePrefix = "vpn"
+
+// legacyServicePrefix is what this package used before the project was
+// renamed from vpn-l2tp to vpn — GetPSK/GetPassword fall back to it so an
+// existing install's already-stored secrets keep working after an update
+// instead of suddenly reporting "not found".
+const legacyServicePrefix = "vpn-l2tp"
 
 // Absolute path, not just "security" — this runs as root when called
 // from an elevated context (Connect reads secrets while privilege.Elevate
@@ -31,14 +37,28 @@ func passwordService(profile, account string) string {
 	return fmt.Sprintf("%s.pwd.%s.%s", servicePrefix, profile, account)
 }
 
+func legacyPskService(profile string) string {
+	return fmt.Sprintf("%s.psk.%s", legacyServicePrefix, profile)
+}
+
+func legacyPasswordService(profile, account string) string {
+	return fmt.Sprintf("%s.pwd.%s.%s", legacyServicePrefix, profile, account)
+}
+
 // SetPSK stores (or overwrites) the IPsec pre-shared key for a profile.
 func SetPSK(profile, psk string) error {
 	return set(pskService(profile), profile, psk)
 }
 
-// GetPSK retrieves the IPsec pre-shared key for a profile.
+// GetPSK retrieves the IPsec pre-shared key for a profile. Falls back to
+// (and migrates) an item stored under the pre-rename service name — see
+// legacyServicePrefix.
 func GetPSK(profile string) (string, error) {
-	return get(pskService(profile), profile)
+	v, err := get(pskService(profile), profile)
+	if err == nil {
+		return v, nil
+	}
+	return migrateGet(pskService(profile), legacyPskService(profile), profile, err)
 }
 
 // DeletePSK removes the stored PSK for a profile, if any.
@@ -51,9 +71,15 @@ func SetPassword(profile, account, password string) error {
 	return set(passwordService(profile, account), account, password)
 }
 
-// GetPassword retrieves an account's VPN login password.
+// GetPassword retrieves an account's VPN login password. Falls back to
+// (and migrates) an item stored under the pre-rename service name — see
+// legacyServicePrefix.
 func GetPassword(profile, account string) (string, error) {
-	return get(passwordService(profile, account), account)
+	v, err := get(passwordService(profile, account), account)
+	if err == nil {
+		return v, nil
+	}
+	return migrateGet(passwordService(profile, account), legacyPasswordService(profile, account), account, err)
 }
 
 // DeletePassword removes a stored account password, if any.
@@ -81,6 +107,21 @@ func set(service, account, secret string) error {
 		return fmt.Errorf("store secret in Keychain: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
+}
+
+// migrateGet is GetPSK/GetPassword's fallback path: try the legacy
+// (pre-rename) service name, and if found there, move it — store under
+// newService, delete legacyService — so this only ever happens once per
+// item instead of silently reading from the legacy name forever.
+func migrateGet(newService, legacyService, account string, newErr error) (string, error) {
+	v, err := get(legacyService, account)
+	if err != nil {
+		return "", newErr // neither name has it — report the original (new-name) error
+	}
+	if err := set(newService, account, v); err == nil {
+		_ = delete_(legacyService, account)
+	}
+	return v, nil
 }
 
 func get(service, account string) (string, error) {

@@ -1,4 +1,4 @@
-// Package config manages vpn-l2tp's non-secret profile/account configuration.
+// Package config manages vpn's non-secret profile/account configuration.
 // Secrets (PSK, account passwords) are never stored here — see internal/keychain.
 package config
 
@@ -55,14 +55,23 @@ var DefaultESPProposals = []string{
 	"3des-sha1",
 }
 
-// Dir returns ~/.config/vpn-l2tp, creating it with 0700 permissions if
-// missing.
+// Dir returns ~/.config/vpn, creating it with 0700 permissions if missing.
+// If ~/.config/vpn-l2tp exists from before the project was renamed from
+// vpn-l2tp to vpn, and ~/.config/vpn doesn't exist yet, it's moved into
+// place first — so an update doesn't strand an existing install's saved
+// profiles/accounts under the old path.
 func Dir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
-	dir := filepath.Join(home, ".config", "vpn-l2tp")
+	dir := filepath.Join(home, ".config", "vpn")
+	legacyDir := filepath.Join(home, ".config", "vpn-l2tp")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		if _, err := os.Stat(legacyDir); err == nil {
+			_ = os.Rename(legacyDir, dir) // best-effort; MkdirAll below covers failure
+		}
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create config directory: %w", err)
 	}

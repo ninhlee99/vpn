@@ -76,7 +76,7 @@ func Connect(cfg Config) error {
 	var ipcp ppp.NegotiatedIPCP
 
 	setupErr := privilege.Elevate(func() error {
-		// vpnlog.Init has to run here, not before Elevate: /var/log/vpn-l2tp.log
+		// vpnlog.Init has to run here, not before Elevate: /var/log/vpn.log
 		// is root-owned (see internal/vpnlog), and this is the one point in
 		// Connect that's actually privileged. Once open, the fd stays valid
 		// for every later vpnlog call in this process regardless of euid —
