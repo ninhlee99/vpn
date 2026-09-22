@@ -7,7 +7,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/vpnlog"
 )
 
 const stage = "IKE"
@@ -84,9 +84,21 @@ func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
 	// NAT-D "my view of your address" computation, and some firewalls'
 	// UDP/500 conntrack entries, on the client also using port 500 for the
 	// pre-NAT-T exchange — matching what every real IKE client does.
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 500})
+	//
+	// Bind to cfg.LocalIP specifically, not the wildcard address: this is
+	// the one real OS socket this client ever opens for IKE/ESP (NAT-T just
+	// switches the *destination* port to 4500, staying on this same local
+	// socket — L2TP's "port 1701" is a virtual header this client builds
+	// inside the ESP payload in internal/engine/transport.go, never a real
+	// socket, so there's nothing to bind there). A wildcard bind lets the
+	// kernel repick the source address/interface for every sendto against
+	// whatever the routing table says *at that moment* — exactly what
+	// bit us once ApplyFullTunnel's split-default routes are in the
+	// picture and something reshuffles the route table. Pinning to a
+	// specific local address removes that ambiguity.
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: cfg.LocalIP, Port: 500})
 	if err != nil {
-		return nil, fmt.Errorf("bind local UDP/500 (needs root, or another IKE client is already using it): %w", err)
+		return nil, fmt.Errorf("bind local UDP/500 on %s (needs root, or another IKE client is already using it): %w", cfg.LocalIP, err)
 	}
 
 	sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP}

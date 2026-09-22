@@ -5,11 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/ike"
-	"github.com/ninhlee99/vpn-l2tp/internal/ipsec"
-	"github.com/ninhlee99/vpn-l2tp/internal/l2tp"
-	"github.com/ninhlee99/vpn-l2tp/internal/ppp"
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/ike"
+	"vpn/internal/ipsec"
+	"vpn/internal/l2tp"
+	"vpn/internal/ppp"
+	"vpn/internal/vpnlog"
 )
 
 // espTransport implements l2tp.Transport over an ESP SA pair carried inside

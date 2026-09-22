@@ -44,16 +44,21 @@ func ParseIPv4Option(o Option) (net.IP, bool) {
 }
 
 // NegotiatedIPCP is the result of a completed IPCP negotiation: our
-// assigned address and whatever DNS servers the LNS handed out (may be
-// none — the reference server may not push DNS at all, in which case the
-// engine keeps the original resolver config, matching the goal's "never
-// silently hand out public DNS the server didn't provide").
+// assigned address, the LNS's own inside address (needed to configure the
+// utun interface as a point-to-point link), and whatever DNS servers the
+// LNS handed out (may be none — the reference server may not push DNS at
+// all, in which case the engine keeps the original resolver config,
+// matching the goal's "never silently hand out public DNS the server
+// didn't provide").
 type NegotiatedIPCP struct {
 	LocalIP    net.IP
+	PeerIP     net.IP
 	PrimaryDNS net.IP
 	SecondDNS  net.IP
 }
 
+// ApplyOption applies one option from *our own* final, peer-acked
+// Configure-Request — the values this side actually ended up using.
 func (n *NegotiatedIPCP) ApplyOption(o Option) {
 	ip, ok := ParseIPv4Option(o)
 	if !ok {
@@ -66,5 +71,18 @@ func (n *NegotiatedIPCP) ApplyOption(o Option) {
 		n.PrimaryDNS = ip
 	case IPCPOptSecondaryDNS:
 		n.SecondDNS = ip
+	}
+}
+
+// ApplyPeerOption applies one option from the *peer's* (LNS's) own
+// Configure-Request — only its IP-Address option is meaningful to us, as
+// the LNS's inside address, needed to bring up the utun interface as a
+// point-to-point link to it.
+func (n *NegotiatedIPCP) ApplyPeerOption(o Option) {
+	if o.Type != IPCPOptIPAddress {
+		return
+	}
+	if ip, ok := ParseIPv4Option(o); ok {
+		n.PeerIP = ip
 	}
 }

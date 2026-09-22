@@ -35,17 +35,29 @@ type State struct {
 	FailStage   string    `json:"fail_stage,omitempty"`
 	FailDetail  string    `json:"fail_detail,omitempty"`
 	SavedRoutes bool      `json:"saved_routes"` // true once original routing/DNS captured for repair/restore
+
+	// DNS snapshot, captured before Apply so disconnect/repair can restore
+	// it even if that's a different process invocation than the one that
+	// connected (e.g. after a crash — see dnsmgr.Snapshot). DNSApplied
+	// distinguishes "no DNS servers were pushed" (nothing to restore) from
+	// "the original config was itself empty/DHCP" (restore to Empty).
+	DNSService string   `json:"dns_service,omitempty"`
+	DNSServers []string `json:"dns_servers,omitempty"`
+	DNSApplied bool     `json:"dns_applied,omitempty"`
 }
+
+// Dir is where the state file lives — exported so `uninstall` can remove it
+// without needing its own copy of the path.
+const Dir = "/var/run/vpn"
 
 func runDir() (string, error) {
 	// /var/run requires root, which connect/disconnect/repair already need
 	// (route and utun changes are root-only on macOS), so the state file
 	// lives there rather than under the user's home.
-	dir := "/var/run/vpn-l2tp"
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(Dir, 0o755); err != nil {
 		return "", err
 	}
-	return dir, nil
+	return Dir, nil
 }
 
 func path() (string, error) {

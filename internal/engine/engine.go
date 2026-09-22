@@ -7,17 +7,23 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/ike"
-	"github.com/ninhlee99/vpn-l2tp/internal/ipsec"
-	"github.com/ninhlee99/vpn-l2tp/internal/l2tp"
-	"github.com/ninhlee99/vpn-l2tp/internal/ppp"
-	"github.com/ninhlee99/vpn-l2tp/internal/routing"
-	"github.com/ninhlee99/vpn-l2tp/internal/state"
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/dnsmgr"
+	"vpn/internal/ike"
+	"vpn/internal/ipsec"
+	"vpn/internal/l2tp"
+	"vpn/internal/ppp"
+	"vpn/internal/privilege"
+	"vpn/internal/routing"
+	"vpn/internal/state"
+	"vpn/internal/tun"
+	"vpn/internal/vpnlog"
 )
 
 // LogPath returns where `logs`/`connect --verbose` write to.
@@ -44,6 +50,17 @@ type Config struct {
 // interface up, routes/DNS applied, and state.Save()'d as CONNECTED. On any
 // failure, it restores whatever it had already changed before returning —
 // a failed connect must never leave the machine half-configured.
+//
+// Privilege footprint: negotiation (IKE/L2TP/PPP — binding UDP/500, then
+// parsing whatever the far end sends) and setup (opening utun, route/DNS
+// changes) run under privilege.Elevate, since those genuinely need root on
+// macOS. Once the tunnel is up, runDataPlane — the long-lived loop that
+// continuously parses untrusted IP packets from the far end of the tunnel
+// for as long as the VPN stays connected — runs at the caller's real,
+// unprivileged UID: it only needs the already-open utun fd and ESP socket,
+// neither of which requires root once open, so there's no reason for the
+// process to keep holding root through what's normally the vast majority
+// of a session's lifetime.
 func Connect(cfg Config) error {
 	if err := vpnlog.Init(cfg.Verbose); err != nil {
 		return fmt.Errorf("open log file: %w", err)
@@ -53,93 +70,287 @@ func Connect(cfg Config) error {
 	}
 
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server}
-	_ = st.Save()
 
-	fail := func(stage, detail string, err error) error {
-		st.Phase = state.PhaseFailed
-		st.FailStage = stage
-		st.FailDetail = detail
+	var rtSnapshot *routing.Snapshot
+	var dnsSnap *dnsmgr.Snapshot
+	var l2tpTun *l2tp.Tunnel
+	var dev *tun.Device
+	var pppT *pppOverL2TP
+	var ipcp ppp.NegotiatedIPCP
+
+	setupErr := privilege.Elevate(func() error {
 		_ = st.Save()
-		vpnlog.Error(stage, detail, vpnlog.Fields{"err": err})
-		return fmt.Errorf("%s: %s: %w", stage, detail, err)
-	}
 
-	rtSnapshot, err := routing.Capture()
-	if err != nil {
-		return fail("ROUTE_FAILURE", "capture current routing state", err)
-	}
+		fail := func(stage, detail string, err error) error {
+			st.Phase = state.PhaseFailed
+			st.FailStage = stage
+			st.FailDetail = detail
+			_ = st.Save()
+			vpnlog.Error(stage, detail, vpnlog.Fields{"err": err})
+			return fmt.Errorf("%s: %s: %w", stage, detail, err)
+		}
 
-	serverIP, err := resolveServer(cfg.Server)
-	if err != nil {
-		return fail("DNS_FAILURE", "resolve VPN server", err)
-	}
-	if err := rtSnapshot.ProtectServer(serverIP.String()); err != nil {
-		return fail("ROUTE_FAILURE", "protect VPN server route", err)
-	}
+		var err error
+		rtSnapshot, err = routing.Capture()
+		if err != nil {
+			return fail("ROUTE_FAILURE", "capture current routing state", err)
+		}
 
-	localIP := localOutboundIP(rtSnapshot.DefaultInterface)
-	if localIP == nil {
-		return fail("ROUTE_FAILURE", "determine local outbound IP", fmt.Errorf("no IPv4 on %s", rtSnapshot.DefaultInterface))
-	}
+		serverIP, err := resolveServer(cfg.Server)
+		if err != nil {
+			return fail("DNS_FAILURE", "resolve VPN server", err)
+		}
+		if err := rtSnapshot.ProtectServer(serverIP.String()); err != nil {
+			return fail("ROUTE_FAILURE", "protect VPN server route", err)
+		}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
-	defer cancel()
+		localIP := localOutboundIP(rtSnapshot.DefaultInterface)
+		if localIP == nil {
+			return fail("ROUTE_FAILURE", "determine local outbound IP", fmt.Errorf("no IPv4 on %s", rtSnapshot.DefaultInterface))
+		}
 
-	ikeProposals := cfg.IKEProposals
-	sess, err := ike.EstablishPhase1(ctx, ike.Config{
-		ServerHost: serverIP.String(),
-		ServerID:   cfg.ServerID,
-		PSK:        cfg.PSK,
-		Proposals:  ikeProposals,
-		LocalIP:    localIP,
+		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+		defer cancel()
+
+		sess, err := ike.EstablishPhase1(ctx, ike.Config{
+			ServerHost: serverIP.String(),
+			ServerID:   cfg.ServerID,
+			PSK:        cfg.PSK,
+			Proposals:  cfg.IKEProposals,
+			LocalIP:    localIP,
+		})
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IKE_TIMEOUT", "IKEv1 Phase 1 negotiation", err)
+		}
+		vpnlog.Info("ENGINE", "IKE Phase 1 established", vpnlog.Fields{"nat_detected": sess.NATDetected})
+
+		qm, err := sess.EstablishQuickMode(cfg.ESPProposals, localIP, serverIP)
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IPSEC_FAILURE", "Quick Mode (ESP SA) negotiation", err)
+		}
+		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
+
+		espT := &espTransport{
+			sess: sess,
+			out:  &ipsec.SA{SPI: qm.Outbound.SPI, EncKey: qm.Outbound.EncKey, AuthKey: qm.Outbound.AuthKey},
+			in:   &ipsec.SA{SPI: qm.Inbound.SPI, EncKey: qm.Inbound.EncKey, AuthKey: qm.Inbound.AuthKey},
+		}
+
+		hostName, _ := localHostName()
+		l2tpTun, err = l2tp.Establish(ctx, espT, l2tp.Config{HostName: hostName, Timeout: cfg.Timeout})
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("L2TP_TIMEOUT", "L2TP tunnel/session establishment", err)
+		}
+		vpnlog.Info("ENGINE", "L2TP session established", nil)
+
+		pppT = &pppOverL2TP{tun: l2tpTun}
+		mru := uint16(cfg.MTU)
+		if mru == 0 {
+			mru = 1400
+		}
+		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
+		if err != nil {
+			l2tpTun.Close()
+			_ = rtSnapshot.Restore()
+			return fail(pppFailStage(err), "PPP negotiation", err)
+		}
+		ipcp = pppResult.IPCP
+		vpnlog.Info("ENGINE", "PPP OPENED", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "peer_ip": ipcp.PeerIP.String()})
+
+		// Everything below is teardown-on-failure just like the stages
+		// above, but now there are more resources (utun device, interface
+		// config, DNS) to unwind in reverse order if any step fails.
+		dev, err = tun.Open()
+		if err != nil {
+			l2tpTun.Close()
+			_ = rtSnapshot.Restore()
+			return fail("TUN_FAILURE", "open utun device", err)
+		}
+		teardownPartial := func() {
+			dev.Close()
+			l2tpTun.Close()
+			if dnsSnap != nil {
+				_ = dnsSnap.Restore()
+			}
+			_ = rtSnapshot.Restore()
+		}
+
+		if ipcp.PeerIP == nil {
+			teardownPartial()
+			return fail("TUN_FAILURE", "configure utun interface", fmt.Errorf("LNS never sent its own IPCP IP-Address option — nothing to point the point-to-point link at"))
+		}
+		if err := routing.ConfigureP2PInterface(dev.Name, ipcp.LocalIP.String(), ipcp.PeerIP.String(), int(mru)); err != nil {
+			teardownPartial()
+			return fail("TUN_FAILURE", "configure utun interface", err)
+		}
+		vpnlog.Info("ENGINE", "utun interface up", vpnlog.Fields{"device": dev.Name, "local_ip": ipcp.LocalIP.String(), "peer_ip": ipcp.PeerIP.String()})
+
+		if cfg.FullTunnel {
+			if err := rtSnapshot.ApplyFullTunnel(dev.Name); err != nil {
+				teardownPartial()
+				return fail("ROUTE_FAILURE", "apply full-tunnel default routes", err)
+			}
+			vpnlog.Info("ENGINE", "full-tunnel routes applied", vpnlog.Fields{"device": dev.Name})
+		}
+
+		dnsServers := dnsServerStrings(ipcp)
+		if len(dnsServers) > 0 {
+			service, err := dnsmgr.ServiceForInterface(rtSnapshot.DefaultInterface)
+			if err != nil {
+				teardownPartial()
+				return fail("DNS_FAILURE", "map default interface to a network service", err)
+			}
+			snap, err := dnsmgr.Capture(service)
+			if err != nil {
+				teardownPartial()
+				return fail("DNS_FAILURE", "capture current DNS configuration", err)
+			}
+			if err := snap.Apply(dnsServers); err != nil {
+				teardownPartial()
+				return fail("DNS_FAILURE", "apply LNS-provided DNS servers", err)
+			}
+			dnsSnap = snap
+			st.DNSService = snap.Service
+			st.DNSServers = snap.Servers
+			st.DNSApplied = true
+			vpnlog.Info("ENGINE", "DNS applied", vpnlog.Fields{"service": service, "servers": dnsServers})
+		}
+
+		st.Phase = state.PhaseConnected
+		st.PID = os.Getpid()
+		st.TunDevice = dev.Name
+		st.LocalIP = ipcp.LocalIP.String()
+		st.SavedRoutes = true
+		if err := st.Save(); err != nil {
+			teardownPartial()
+			return fail("STATE_FAILURE", "persist connected state", err)
+		}
+		return nil
 	})
-	if err != nil {
+	if setupErr != nil {
+		return setupErr
+	}
+	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name})
+
+	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pumpErr := runDataPlane(runCtx, dev, pppT)
+
+	// Tear down on the way out no matter why the pump stopped (signal or
+	// error) — the disconnect/repair CLI paths exist for when this process
+	// is no longer around to do it itself, not as the primary mechanism.
+	return privilege.Elevate(func() error {
+		dev.Close()
+		l2tpTun.Close()
+		if dnsSnap != nil {
+			_ = dnsSnap.Restore()
+		}
 		_ = rtSnapshot.Restore()
-		return fail("IKE_TIMEOUT", "IKEv1 Phase 1 negotiation", err)
-	}
-	vpnlog.Info("ENGINE", "IKE Phase 1 established", vpnlog.Fields{"nat_detected": sess.NATDetected})
+		_ = state.Clear()
 
-	qm, err := sess.EstablishQuickMode(cfg.ESPProposals, localIP, serverIP)
-	if err != nil {
-		_ = rtSnapshot.Restore()
-		return fail("IPSEC_FAILURE", "Quick Mode (ESP SA) negotiation", err)
-	}
-	vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
+		if pumpErr != nil && runCtx.Err() == nil {
+			// Stopped for a reason other than the signal we were waiting for.
+			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr})
+			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
+		}
+		vpnlog.Info("ENGINE", "disconnected", nil)
+		return nil
+	})
+}
 
-	espT := &espTransport{
-		sess: sess,
-		out:  &ipsec.SA{SPI: qm.Outbound.SPI, EncKey: qm.Outbound.EncKey, AuthKey: qm.Outbound.AuthKey},
-		in:   &ipsec.SA{SPI: qm.Inbound.SPI, EncKey: qm.Inbound.EncKey, AuthKey: qm.Inbound.AuthKey},
+// dnsServerStrings collects the LNS-provided DNS servers as strings,
+// skipping any that are absent or 0.0.0.0 (the LNS declining to supply
+// one, encoded the same way a IPCP request placeholder is).
+func dnsServerStrings(ipcp ppp.NegotiatedIPCP) []string {
+	var out []string
+	for _, ip := range []net.IP{ipcp.PrimaryDNS, ipcp.SecondDNS} {
+		if ip == nil || ip.IsUnspecified() {
+			continue
+		}
+		out = append(out, ip.String())
 	}
+	return out
+}
 
-	hostName, _ := localHostName()
-	tun, err := l2tp.Establish(ctx, espT, l2tp.Config{HostName: hostName, Timeout: cfg.Timeout})
-	if err != nil {
-		_ = rtSnapshot.Restore()
-		return fail("L2TP_TIMEOUT", "L2TP tunnel/session establishment", err)
-	}
-	vpnlog.Info("ENGINE", "L2TP session established", nil)
+// runDataPlane bridges the utun device and the PPP/L2TP/ESP stack: every
+// IP packet read from one side is written to the other. It blocks until
+// ctx is cancelled or either direction hits a fatal error.
+func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error {
+	errCh := make(chan error, 2)
 
-	pppT := &pppOverL2TP{tun: tun}
-	mru := uint16(cfg.MTU)
-	if mru == 0 {
-		mru = 1400
-	}
-	pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
-	if err != nil {
-		tun.Close()
-		_ = rtSnapshot.Restore()
-		return fail(pppFailStage(err), "PPP negotiation", err)
-	}
-	vpnlog.Info("ENGINE", "PPP OPENED", vpnlog.Fields{"local_ip": pppResult.IPCP.LocalIP.String()})
+	// utun -> PPP -> L2TP -> ESP
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, err := dev.Read(buf)
+			if err != nil {
+				select {
+				case errCh <- fmt.Errorf("read utun: %w", err):
+				default:
+				}
+				return
+			}
+			if n == 0 {
+				continue
+			}
+			if err := pppT.SendFrame(ppp.ProtoIP, buf[:n]); err != nil {
+				select {
+				case errCh <- fmt.Errorf("send PPP frame: %w", err):
+				default:
+				}
+				return
+			}
+		}
+	}()
 
-	// The utun packet-forwarding loop (bridging the kernel interface to this
-	// PPP/L2TP/ESP stack) and route/DNS application are not yet wired in —
-	// report exactly how far this attempt got instead of claiming a usable
-	// tunnel that isn't actually routing traffic yet.
-	tun.Close()
-	_ = rtSnapshot.Restore()
-	return fail("NOT_YET_IMPLEMENTED", fmt.Sprintf("PPP established (local IP %s); utun packet forwarding not yet wired in", pppResult.IPCP.LocalIP), fmt.Errorf("in progress"))
+	// ESP -> L2TP -> PPP -> utun
+	go func() {
+		for {
+			proto, payload, err := pppT.RecvFrame(ctx)
+			if err != nil {
+				select {
+				case errCh <- fmt.Errorf("recv PPP frame: %w", err):
+				default:
+				}
+				return
+			}
+			switch proto {
+			case ppp.ProtoIP:
+				if _, err := dev.Write(payload); err != nil {
+					select {
+					case errCh <- fmt.Errorf("write utun: %w", err):
+					default:
+					}
+					return
+				}
+			case ppp.ProtoLCP:
+				// The LNS may keep sending LCP Echo-Requests as a keepalive
+				// during the data phase (negotiatePhase only handles these
+				// while a Configure-Request/-Ack exchange is in flight) —
+				// reply so it doesn't conclude the link died and tear the
+				// session down from its side.
+				pkt, err := ppp.ParseControlPacket(payload)
+				if err == nil && pkt.Code == ppp.CodeEchoRequest {
+					reply := ppp.ControlPacket{Code: ppp.CodeEchoReply, Identifier: pkt.Identifier, Data: pkt.Data}
+					_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
+				}
+			}
+			// Other protocols (e.g. IPV6CP, which this client never
+			// negotiates) are silently ignored — the peer already knows we
+			// didn't ack them.
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-errCh:
+		return err
+	}
 }
 
 func pppFailStage(err error) string {
@@ -156,7 +367,13 @@ func localHostName() (string, error) {
 	return "l2tp-cli", nil
 }
 
-// Disconnect tears down a running connection cleanly, per the saved state.
+// Disconnect tears down a running connection. `connect` runs in the
+// foreground (or daemonized) for as long as the tunnel is up — see its
+// runDataPlane loop — so the normal path here is to signal that live
+// process and let it do its own graceful teardown (closing the utun
+// device, restoring routes/DNS, clearing state) exactly like a Ctrl-C
+// would. Only if that process is gone (crashed, killed -9) does this fall
+// back to redoing the restore itself from what was last recorded on disk.
 func Disconnect() error {
 	st, err := state.Load()
 	if err != nil {
@@ -166,30 +383,72 @@ func Disconnect() error {
 		fmt.Println("Already disconnected.")
 		return nil
 	}
-	if st.Server != "" {
-		_ = routing.RestoreByServerIP(st.Server)
-	}
-	return state.Clear()
+	return privilege.Elevate(func() error {
+		if st.PID > 0 && processAlive(st.PID) {
+			if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil {
+				return fmt.Errorf("signal running connect process (pid %d): %w", st.PID, err)
+			}
+			for i := 0; i < 50; i++ { // up to ~5s for its own teardown to finish
+				time.Sleep(100 * time.Millisecond)
+				cur, err := state.Load()
+				if err == nil && cur.Phase == state.PhaseDisconnected {
+					fmt.Println("Disconnected.")
+					return nil
+				}
+			}
+			fmt.Println("Sent disconnect signal; still tearing down — check `vpn status`.")
+			return nil
+		}
+		// No live process to signal — restore from what was last recorded.
+		restoreRecorded(st)
+		return state.Clear()
+	})
 }
 
 // Repair restores routing/DNS state after an abnormal termination, without
 // needing credentials — it only ever removes state this client could have
-// added (the two split-default override routes, and a host route to
-// whatever server address was last recorded).
+// added (the two split-default override routes, the host route to
+// whatever server address was last recorded, and the DNS servers it
+// pushed). It refuses to act while a `connect` process is still alive —
+// use `disconnect` for that, which lets that process tear itself down
+// instead of racing it.
 func Repair() error {
 	st, err := state.Load()
 	if err != nil {
 		return err
 	}
-	if st.Server == "" {
-		fmt.Println("No recorded server to repair routes for — nothing to do.")
+	if st.PID > 0 && processAlive(st.PID) {
+		return fmt.Errorf("connect (pid %d) is still running — use `vpn disconnect` instead", st.PID)
+	}
+	return privilege.Elevate(func() error {
+		if st.Server == "" {
+			fmt.Println("No recorded server to repair routes for — nothing to do.")
+			return state.Clear()
+		}
+		restoreRecorded(st)
+		fmt.Printf("Restored routing/DNS state for %s.\n", st.Server)
 		return state.Clear()
+	})
+}
+
+// restoreRecorded redoes routing.Restore/dnsmgr.Restore purely from what
+// was last persisted to disk — the only option once the process that held
+// the live *routing.Snapshot/*dnsmgr.Snapshot objects is no longer around.
+func restoreRecorded(st *state.State) {
+	if st.Server != "" {
+		_ = routing.RestoreByServerIP(st.Server)
 	}
-	if err := routing.RestoreByServerIP(st.Server); err != nil {
-		return err
+	if st.DNSApplied && st.DNSService != "" {
+		_ = dnsmgr.FromRecorded(st.DNSService, st.DNSServers, true).Restore()
 	}
-	fmt.Printf("Restored routing state for %s.\n", st.Server)
-	return state.Clear()
+}
+
+// processAlive reports whether pid names a live process this user can
+// signal — sending signal 0 performs the existence/permission check
+// without actually delivering anything (man 2 kill).
+func processAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 func resolveServer(host string) (net.IP, error) {
@@ -208,8 +467,13 @@ func resolveServer(host string) (net.IP, error) {
 	return ips[0], nil
 }
 
+// ifconfigBin: absolute path, not bare "ifconfig" — same PATH-hijack
+// concern as routing.go/dnsmgr.go/keychain.go (this runs while
+// privilege.Elevate is raised, inside Connect's setup phase).
+const ifconfigBin = "/sbin/ifconfig"
+
 func localOutboundIP(iface string) net.IP {
-	out, err := exec.Command("ifconfig", iface).Output()
+	out, err := exec.Command(ifconfigBin, iface).Output()
 	if err != nil {
 		return nil
 	}

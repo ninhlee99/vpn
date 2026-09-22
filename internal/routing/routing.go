@@ -11,6 +11,15 @@ import (
 	"strings"
 )
 
+// Absolute paths, not just "route"/"ifconfig" — routing.go's callers run
+// under privilege.Elevate (effective root), and a bare command name would
+// be resolved via $PATH, which a local non-root user fully controls —
+// classic setuid PATH hijacking.
+const (
+	routeBin    = "/sbin/route"
+	ifconfigBin = "/sbin/ifconfig"
+)
+
 // Snapshot is the pre-VPN routing state, captured once before any change so
 // Restore can put the machine back exactly as it was.
 type Snapshot struct {
@@ -25,7 +34,7 @@ type Snapshot struct {
 // Capture reads the current default route. It must be called before any
 // other function in this package changes anything.
 func Capture() (*Snapshot, error) {
-	out, err := exec.Command("route", "-n", "get", "default").Output()
+	out, err := exec.Command(routeBin, "-n", "get", "default").Output()
 	if err != nil {
 		return nil, fmt.Errorf("read default route: %w", err)
 	}
@@ -46,19 +55,49 @@ func Capture() (*Snapshot, error) {
 }
 
 // ProtectServer adds an explicit host route to the VPN server through the
-// original gateway, so the tunnel's own encrypted traffic keeps leaving via
-// the real interface instead of recursing into the tunnel once the default
-// route is overridden.
+// original gateway, so the tunnel's own encrypted traffic (the raw
+// UDP/500+4500 IKE/ESP socket, wildcard-bound and therefore re-routed by
+// the kernel on every send) keeps leaving via the real interface instead
+// of recursing into the tunnel once the default route is overridden.
+// `-static` matters here, not just documentation: without it, macOS's own
+// network reconciliation (IPMonitor) can reap a route it doesn't recognize
+// as one of its own the next time it resyncs the routing table against
+// network state — which the split-default 0.0.0.0/1 + 128.0.0.0/1 override
+// in ApplyFullTunnel below is exactly the kind of unusual state that
+// triggers. If this host route disappears, ESP-to-the-server traffic falls
+// through to the /1 default, which points into the tunnel interface — a
+// route that can't actually reach the server (only the LNS's own inside
+// address is reachable point-to-point through it) — producing exactly a
+// `sendto: can't assign requested address` death spiral.
 func (s *Snapshot) ProtectServer(serverIP string) error {
 	s.VPNServerIP = serverIP
 	// Idempotent: delete-then-add so re-running connect after a crash
 	// doesn't fail on "route already exists".
-	_ = exec.Command("route", "-n", "delete", "-host", serverIP).Run()
-	cmd := exec.Command("route", "-n", "add", "-host", serverIP, s.DefaultGateway)
+	_ = exec.Command(routeBin, "-n", "delete", "-host", serverIP).Run()
+	cmd := exec.Command(routeBin, "-n", "add", "-static", "-host", serverIP, s.DefaultGateway)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("add host route to VPN server via %s: %w (%s)", s.DefaultGateway, err, strings.TrimSpace(string(out)))
 	}
 	s.hostRouteAdded = true
+	return nil
+}
+
+// ConfigureP2PInterface brings the utun interface up as a point-to-point
+// link to the LNS's inside address — `ifconfig <if> <local> <peer> netmask
+// 255.255.255.255 mtu <mtu> up`, the standard BSD point-to-point form (no
+// ARP on a utun device, so the kernel needs the explicit peer address
+// rather than a subnet to know the link is reachable at all; this also
+// implicitly installs the host route to peer that ApplyFullTunnel's
+// "-interface" routes rely on being resolvable).
+func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
+	args := []string{iface, "inet", local, peer, "netmask", "255.255.255.255"}
+	if mtu > 0 {
+		args = append(args, "mtu", fmt.Sprintf("%d", mtu))
+	}
+	args = append(args, "up")
+	if out, err := exec.Command(ifconfigBin, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("configure %s (%s -> %s): %w (%s)", iface, local, peer, err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 
@@ -69,7 +108,7 @@ func (s *Snapshot) ProtectServer(serverIP string) error {
 func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	s.tunIface = tunIface
 	for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		cmd := exec.Command("route", "-n", "add", "-net", net, "-interface", tunIface)
+		cmd := exec.Command(routeBin, "-n", "add", "-static", "-net", net, "-interface", tunIface)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add override route %s via %s: %w (%s)", net, tunIface, err, strings.TrimSpace(string(out)))
 		}
@@ -86,13 +125,13 @@ func (s *Snapshot) Restore() error {
 	var errs []string
 	if s.overrideAdded {
 		for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-			if out, err := exec.Command("route", "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+			if out, err := exec.Command(routeBin, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove override route %s: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
 		}
 	}
 	if s.hostRouteAdded && s.VPNServerIP != "" {
-		if out, err := exec.Command("route", "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+		if out, err := exec.Command(routeBin, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 			errs = append(errs, fmt.Sprintf("remove VPN server host route: %v (%s)", err, strings.TrimSpace(string(out))))
 		}
 	}

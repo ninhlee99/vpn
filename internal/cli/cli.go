@@ -1,4 +1,4 @@
-// Package cli implements l2tp-cli's subcommands.
+// Package cli implements vpn's subcommands.
 package cli
 
 import (
@@ -9,10 +9,10 @@ import (
 	"os"
 	"sort"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/config"
-	"github.com/ninhlee99/vpn-l2tp/internal/diagnostics"
-	"github.com/ninhlee99/vpn-l2tp/internal/keychain"
-	"github.com/ninhlee99/vpn-l2tp/internal/secretinput"
+	"vpn/internal/config"
+	"vpn/internal/diagnostics"
+	"vpn/internal/keychain"
+	"vpn/internal/secretinput"
 )
 
 // Version is set at build time via -ldflags "-X .../cli.Version=...".
@@ -30,7 +30,7 @@ func Run(args []string) int {
 	var err error
 	switch cmd {
 	case "version":
-		fmt.Println("l2tp-cli " + Version)
+		fmt.Println("vpn " + Version)
 	case "init":
 		err = cmdInit(rest)
 	case "profile":
@@ -39,8 +39,6 @@ func Run(args []string) int {
 		err = cmdAccount(rest)
 	case "diagnose":
 		err = cmdDiagnose(rest)
-	case "test":
-		err = cmdTest(rest)
 	case "connect":
 		err = cmdConnect(rest)
 	case "disconnect":
@@ -51,6 +49,10 @@ func Run(args []string) int {
 		err = cmdRepair(rest)
 	case "logs":
 		err = cmdLogs(rest)
+	case "update":
+		err = cmdUpdate(rest)
+	case "uninstall":
+		err = cmdUninstall(rest)
 	case "-h", "--help", "help":
 		printUsage()
 		return 0
@@ -68,25 +70,26 @@ func Run(args []string) int {
 }
 
 func printUsage() {
-	fmt.Fprint(os.Stderr, `l2tp-cli — native macOS L2TP/IPsec VPN client (multi-profile, multi-account)
+	fmt.Fprint(os.Stderr, `vpn — native macOS L2TP/IPsec VPN client (multi-profile, multi-account)
 
 Usage:
-  l2tp-cli init                          interactive first-time setup
-  l2tp-cli profile add <name> --server <host> [--server-id id] [--mtu n] [--full-tunnel]
-  l2tp-cli profile list
-  l2tp-cli profile use <name>
-  l2tp-cli profile remove <name>
-  l2tp-cli account add <profile> <account> [--default]
-  l2tp-cli account list <profile>
-  l2tp-cli account use <profile> <account>
-  l2tp-cli diagnose [--profile name] [--server host] [--json]
-  l2tp-cli test [--profile name]
-  l2tp-cli connect [--profile name] [--account name] [--timeout 30s]
-  l2tp-cli disconnect
-  l2tp-cli status [--json]
-  l2tp-cli repair
-  l2tp-cli logs [-f]
-  l2tp-cli version
+  vpn init                          interactive first-time setup
+  vpn profile add <name> --server <host> [--server-id id] [--mtu n] [--full-tunnel]
+  vpn profile list
+  vpn profile use <name>
+  vpn profile remove <name>
+  vpn account add <profile> <account> [--default]
+  vpn account list <profile>
+  vpn account use <profile> <account>
+  vpn diagnose [--profile name] [--server host] [--json]
+  vpn connect [--profile name] [--account name] [--timeout 30s]
+  vpn disconnect
+  vpn status [--json]
+  vpn repair
+  vpn logs [-f]
+  vpn update                        rebuild + reinstall the latest version (only from an install.sh-built binary)
+  vpn uninstall [-y]                remove vpn entirely: binary, log, state, all profiles/accounts (Keychain included)
+  vpn version
 `)
 }
 
@@ -144,7 +147,7 @@ func cmdInit(args []string) error {
 		return err
 	}
 
-	fmt.Printf("Profile %q created (server=%s, account=%s). Run `l2tp-cli diagnose` next.\n", *profileName, *server, *username)
+	fmt.Printf("Profile %q created (server=%s, account=%s). Run `vpn diagnose` next.\n", *profileName, *server, *username)
 	return nil
 }
 
@@ -152,7 +155,7 @@ func cmdInit(args []string) error {
 
 func cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: l2tp-cli profile <add|list|use|remove> ...")
+		return fmt.Errorf("usage: vpn profile <add|list|use|remove> ...")
 	}
 	switch args[0] {
 	case "add":
@@ -177,7 +180,7 @@ func cmdProfileAdd(args []string) error {
 	psk := fs.String("psk", "", "IPsec pre-shared key (prompted if omitted)")
 	fs.Parse(args)
 	if fs.NArg() < 1 {
-		return fmt.Errorf("usage: l2tp-cli profile add <name> --server <host>")
+		return fmt.Errorf("usage: vpn profile add <name> --server <host>")
 	}
 	name := fs.Arg(0)
 	if *server == "" {
@@ -234,7 +237,7 @@ func cmdProfileList(args []string) error {
 
 func cmdProfileUse(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: l2tp-cli profile use <name>")
+		return fmt.Errorf("usage: vpn profile use <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -253,7 +256,7 @@ func cmdProfileUse(args []string) error {
 
 func cmdProfileRemove(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: l2tp-cli profile remove <name>")
+		return fmt.Errorf("usage: vpn profile remove <name>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -282,7 +285,7 @@ func cmdProfileRemove(args []string) error {
 
 func cmdAccount(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: l2tp-cli account <add|list|use> ...")
+		return fmt.Errorf("usage: vpn account <add|list|use> ...")
 	}
 	switch args[0] {
 	case "add":
@@ -302,7 +305,7 @@ func cmdAccountAdd(args []string) error {
 	password := fs.String("password", "", "account password (prompted if omitted)")
 	fs.Parse(args)
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: l2tp-cli account add <profile> <username> [--default]")
+		return fmt.Errorf("usage: vpn account add <profile> <username> [--default]")
 	}
 	profileName, username := fs.Arg(0), fs.Arg(1)
 
@@ -340,7 +343,7 @@ func cmdAccountAdd(args []string) error {
 
 func cmdAccountList(args []string) error {
 	if len(args) != 1 {
-		return fmt.Errorf("usage: l2tp-cli account list <profile>")
+		return fmt.Errorf("usage: vpn account list <profile>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -367,7 +370,7 @@ func cmdAccountList(args []string) error {
 
 func cmdAccountUse(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: l2tp-cli account use <profile> <username>")
+		return fmt.Errorf("usage: vpn account use <profile> <username>")
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -447,7 +450,7 @@ func printReport(r *diagnostics.Report) {
 	if r.FailureStage != "" {
 		fmt.Printf("\nFAIL\nReason:\n  %s\n", r.FailureStage)
 	} else {
-		fmt.Println("\nAll pre-flight checks passed — ready to attempt `l2tp-cli connect`.")
+		fmt.Println("\nAll pre-flight checks passed — ready to attempt `vpn connect`.")
 	}
 	if len(r.Errors) > 0 {
 		fmt.Println("Errors:")

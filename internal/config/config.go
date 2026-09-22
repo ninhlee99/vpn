@@ -78,7 +78,7 @@ func filePath() (string, error) {
 }
 
 // Load reads the config file, returning an empty Config if it does not exist
-// yet (first run — see `l2tp-cli init`).
+// yet (first run — see `vpn init`).
 func Load() (*Config, error) {
 	path, err := filePath()
 	if err != nil {
@@ -133,7 +133,7 @@ func (c *Config) Profile(name string) (string, *Profile, error) {
 		name = c.ActiveProfile
 	}
 	if name == "" {
-		return "", nil, fmt.Errorf("no VPN profile selected — run `l2tp-cli init` or pass --server")
+		return "", nil, fmt.Errorf("no VPN profile selected — run `vpn init` or pass --server")
 	}
 	p, ok := c.Profiles[name]
 	if !ok {

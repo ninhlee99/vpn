@@ -14,6 +14,12 @@ import (
 
 const servicePrefix = "vpn-l2tp"
 
+// Absolute path, not just "security" — this runs as root when called
+// from an elevated context (Connect reads secrets while privilege.Elevate
+// is raised), and a bare command name would be resolved via $PATH, which
+// a local non-root user fully controls — classic setuid PATH hijacking.
+const securityBin = "/usr/bin/security"
+
 // pskService/passwordService namespace Keychain entries per profile/account
 // so multiple VPN profiles and multiple accounts on the same profile never
 // collide with each other or with unrelated Keychain items.
@@ -57,13 +63,13 @@ func DeletePassword(profile, account string) error {
 
 // Has reports whether a secret exists without retrieving its value.
 func Has(service, account string) bool {
-	cmd := exec.Command("security", "find-generic-password", "-s", service, "-a", account)
+	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account)
 	return cmd.Run() == nil
 }
 
 func set(service, account, secret string) error {
 	// -U: update in place if it already exists, instead of erroring.
-	cmd := exec.Command("security", "add-generic-password",
+	cmd := exec.Command(securityBin, "add-generic-password",
 		"-U",
 		"-s", service,
 		"-a", account,
@@ -78,7 +84,7 @@ func set(service, account, secret string) error {
 }
 
 func get(service, account string) (string, error) {
-	cmd := exec.Command("security", "find-generic-password", "-s", service, "-a", account, "-w")
+	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account, "-w")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -89,7 +95,7 @@ func get(service, account string) (string, error) {
 }
 
 func delete_(service, account string) error {
-	cmd := exec.Command("security", "delete-generic-password", "-s", service, "-a", account)
+	cmd := exec.Command(securityBin, "delete-generic-password", "-s", service, "-a", account)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

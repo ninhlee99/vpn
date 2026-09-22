@@ -10,6 +10,10 @@ import (
 	"strings"
 )
 
+// Absolute path, not just "networksetup" — see routing.go's comment on
+// the same pattern; this runs under privilege.Elevate (effective root).
+const networksetupBin = "/usr/sbin/networksetup"
+
 // Snapshot is the pre-VPN DNS configuration for one network service.
 type Snapshot struct {
 	Service string
@@ -20,7 +24,7 @@ type Snapshot struct {
 // ServiceForInterface maps a BSD interface name (e.g. "en0") to the
 // networksetup service name (e.g. "Wi-Fi") that controls it.
 func ServiceForInterface(iface string) (string, error) {
-	out, err := exec.Command("networksetup", "-listallhardwareports").Output()
+	out, err := exec.Command(networksetupBin, "-listallhardwareports").Output()
 	if err != nil {
 		return "", fmt.Errorf("list hardware ports: %w", err)
 	}
@@ -42,7 +46,7 @@ func ServiceForInterface(iface string) (string, error) {
 
 // Capture reads the current DNS servers for service.
 func Capture(service string) (*Snapshot, error) {
-	out, err := exec.Command("networksetup", "-getdnsservers", service).Output()
+	out, err := exec.Command(networksetupBin, "-getdnsservers", service).Output()
 	if err != nil {
 		return nil, fmt.Errorf("read DNS servers for %s: %w", service, err)
 	}
@@ -54,6 +58,14 @@ func Capture(service string) (*Snapshot, error) {
 	return s, nil
 }
 
+// FromRecorded rebuilds a Snapshot from state previously persisted to disk
+// (see internal/state.State's DNS* fields) — used by disconnect/repair when
+// they're a separate process invocation from the one that called Apply, so
+// they have no live *Snapshot to call Restore on.
+func FromRecorded(service string, servers []string, applied bool) *Snapshot {
+	return &Snapshot{Service: service, Servers: servers, applied: applied}
+}
+
 // Apply sets the service's DNS servers to those pushed by the VPN server. An
 // empty list is a no-op (the goal is never to silently hand out public DNS
 // the server didn't provide).
@@ -62,7 +74,7 @@ func (s *Snapshot) Apply(servers []string) error {
 		return nil
 	}
 	args := append([]string{"-setdnsservers", s.Service}, servers...)
-	if out, err := exec.Command("networksetup", args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(networksetupBin, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("set DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
 	}
 	s.applied = true
@@ -79,7 +91,7 @@ func (s *Snapshot) Restore() error {
 	if len(s.Servers) > 0 {
 		args = append([]string{"-setdnsservers", s.Service}, s.Servers...)
 	}
-	if out, err := exec.Command("networksetup", args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(networksetupBin, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("restore DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
 	}
 	return nil

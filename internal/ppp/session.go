@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/vpnlog"
 )
 
 const stage = "PPP"
@@ -73,23 +73,28 @@ func Run(ctx context.Context, t Transport, cfg Config) (*Result, error) {
 // Ack/Nak/Reject, their Ack for ours) until both directions are
 // acknowledged or ctx expires. buildRequest/handlePeerRequest let LCP and
 // IPCP share this loop despite having different option semantics.
+// negotiatePhase's return value is the final Configure-Request options *we*
+// ended up sending once ourAcked — i.e. our own side of the negotiation
+// (our address, in IPCP's case), as opposed to whatever the peer asked for
+// itself via its own Configure-Request.
 func negotiatePhase(
 	ctx context.Context,
 	t Transport,
 	protocol uint16,
 	buildRequestOptions func() []Option,
 	handlePeerConfigureRequest func(opts []Option) (ackOpts []Option, ok bool),
-) error {
+) ([]Option, error) {
 	var ourID uint8 = 1
 	ourAcked := false
 	peerAcked := false
+	ourOptions := buildRequestOptions()
 
 	send := func() error {
-		pkt := ControlPacket{Code: CodeConfigureRequest, Identifier: ourID, Data: MarshalOptions(buildRequestOptions())}
+		pkt := ControlPacket{Code: CodeConfigureRequest, Identifier: ourID, Data: MarshalOptions(ourOptions)}
 		return t.SendFrame(protocol, pkt.Marshal())
 	}
 	if err := send(); err != nil {
-		return err
+		return nil, err
 	}
 
 	retransmit := time.NewTicker(3 * time.Second)
@@ -102,11 +107,11 @@ func negotiatePhase(
 		if err != nil {
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("timed out waiting for peer (our_acked=%v peer_acked=%v)", ourAcked, peerAcked)
+				return nil, fmt.Errorf("timed out waiting for peer (our_acked=%v peer_acked=%v)", ourAcked, peerAcked)
 			default:
 			}
 			if err := send(); err != nil { // retransmit our request
-				return err
+				return nil, err
 			}
 			continue
 		}
@@ -115,13 +120,13 @@ func negotiatePhase(
 		}
 		pkt, err := ParseControlPacket(payload)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		switch pkt.Code {
 		case CodeConfigureRequest:
 			opts, err := ParseOptions(pkt.Data)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			ackOpts, ok := handlePeerConfigureRequest(opts)
 			code := uint8(CodeConfigureAck)
@@ -132,7 +137,7 @@ func negotiatePhase(
 			}
 			resp := ControlPacket{Code: code, Identifier: pkt.Identifier, Data: respData}
 			if err := t.SendFrame(protocol, resp.Marshal()); err != nil {
-				return err
+				return nil, err
 			}
 			if ok {
 				peerAcked = true
@@ -141,13 +146,33 @@ func negotiatePhase(
 			if pkt.Identifier == ourID {
 				ourAcked = true
 			}
-		case CodeConfigureNak, CodeConfigureReject:
-			// Accept whatever the peer countered with on the next attempt —
-			// every option this client sends (MRU, Magic-Number / IP 0.0.0.0,
-			// DNS 0.0.0.0) is safe to drop entirely if rejected.
+		case CodeConfigureNak:
+			// RFC 1661 §5.4: a Nak counters specific option *values* — we
+			// must adopt the peer's suggestions (e.g. its proposed IP/DNS
+			// addresses in place of our 0.0.0.0 placeholders) before
+			// resending, or the peer keeps Naking the same unacceptable
+			// values forever.
+			suggested, err := ParseOptions(pkt.Data)
+			if err != nil {
+				return nil, err
+			}
+			ourOptions = applyNak(ourOptions, suggested)
 			ourID++
 			if err := send(); err != nil {
-				return err
+				return nil, err
+			}
+		case CodeConfigureReject:
+			// RFC 1661 §5.5: a Reject means the peer doesn't recognize the
+			// option at all — drop it entirely (safe for every option this
+			// client sends) rather than resending it unchanged.
+			rejected, err := ParseOptions(pkt.Data)
+			if err != nil {
+				return nil, err
+			}
+			ourOptions = dropRejected(ourOptions, rejected)
+			ourID++
+			if err := send(); err != nil {
+				return nil, err
 			}
 		case CodeEchoRequest:
 			// LCP keepalive from the peer — reply so it doesn't tear down
@@ -156,11 +181,47 @@ func negotiatePhase(
 			_ = t.SendFrame(protocol, reply.Marshal())
 		}
 	}
-	return nil
+	return ourOptions, nil
+}
+
+// applyNak replaces each of our options with the peer's suggested value for
+// that same option type (RFC 1661 §5.4) — the peer only Naks options it
+// wants changed, so any option type it didn't mention keeps our value.
+func applyNak(ours []Option, suggested []Option) []Option {
+	out := make([]Option, len(ours))
+	copy(out, ours)
+	for _, s := range suggested {
+		for i, o := range out {
+			if o.Type == s.Type {
+				out[i] = s
+				break
+			}
+		}
+	}
+	return out
+}
+
+// dropRejected removes every option the peer doesn't recognize at all (RFC
+// 1661 §5.5) so the next Configure-Request doesn't offer it again.
+func dropRejected(ours []Option, rejected []Option) []Option {
+	out := make([]Option, 0, len(ours))
+	for _, o := range ours {
+		skip := false
+		for _, r := range rejected {
+			if r.Type == o.Type {
+				skip = true
+				break
+			}
+		}
+		if !skip {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 func runLCP(ctx context.Context, t Transport, cfg LCPConfig) error {
-	return negotiatePhase(ctx, t, ProtoLCP,
+	_, err := negotiatePhase(ctx, t, ProtoLCP,
 		cfg.ConfigureRequestOptions,
 		func(opts []Option) ([]Option, bool) {
 			// Accept the peer's Configure-Request as-is — this client has
@@ -169,20 +230,31 @@ func runLCP(ctx context.Context, t Transport, cfg LCPConfig) error {
 			// LNS will challenge us with, handled in runAuth, not here.
 			return opts, true
 		})
+	return err
 }
 
 func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
 	result := &NegotiatedIPCP{}
-	err := negotiatePhase(ctx, t, ProtoIPCP,
+	// handlePeerConfigureRequest ACKs the LNS's own Configure-Request
+	// unmodified, and separately records its IP-Address option as PeerIP
+	// (the LNS's inside address, needed for the utun point-to-point setup)
+	// — distinct from our own address/DNS, which come back as the Ack to
+	// *our* Configure-Request instead, so the result is built from
+	// negotiatePhase's returned ourOptions below, not from the peer's
+	// Configure-Request.
+	ourOptions, err := negotiatePhase(ctx, t, ProtoIPCP,
 		RequestIPCPOptions,
 		func(opts []Option) ([]Option, bool) {
 			for _, o := range opts {
-				result.ApplyOption(o)
+				result.ApplyPeerOption(o)
 			}
 			return opts, true
 		})
 	if err != nil {
 		return nil, err
+	}
+	for _, o := range ourOptions {
+		result.ApplyOption(o)
 	}
 	if result.LocalIP == nil {
 		return nil, fmt.Errorf("IPCP completed without an assigned IP address")

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/vpnlog"
 )
 
 const stage = "L2TP"

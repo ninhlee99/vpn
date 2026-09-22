@@ -8,18 +8,17 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/config"
-	"github.com/ninhlee99/vpn-l2tp/internal/engine"
-	"github.com/ninhlee99/vpn-l2tp/internal/keychain"
-	"github.com/ninhlee99/vpn-l2tp/internal/state"
+	"vpn/internal/config"
+	"vpn/internal/engine"
+	"vpn/internal/keychain"
+	"vpn/internal/privilege"
+	"vpn/internal/state"
 )
 
-func cmdTest(args []string) error {
-	// `test` is the no-side-effects sibling of `connect`: it runs the exact
-	// same pre-flight diagnostics connect would, without touching routes,
-	// DNS, or opening a tunnel interface.
-	return cmdDiagnose(args)
-}
+// pathTail: absolute path, not bare "tail" — cmdLogs runs this while
+// privilege.Elevate is raised (see below), same PATH-hijack concern as
+// routing.go/dnsmgr.go/keychain.go.
+const pathTail = "/usr/bin/tail"
 
 func cmdConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
@@ -29,9 +28,10 @@ func cmdConnect(args []string) error {
 	verbose := fs.Bool("verbose", false, "verbose protocol logging")
 	fs.Parse(args)
 
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("connect must run as root (opens a utun interface and changes routes/DNS) — try: sudo l2tp-cli connect")
-	}
+	// No root check here: engine.Connect elevates internally (see
+	// internal/privilege) for exactly the steps that need it, and returns
+	// a clear error itself if this process can't (not root, not installed
+	// setuid via install.sh).
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -47,11 +47,11 @@ func cmdConnect(args []string) error {
 	}
 	psk, err := keychain.GetPSK(pName)
 	if err != nil {
-		return fmt.Errorf("no PSK stored for profile %q — run `l2tp-cli init` or `l2tp-cli profile add`: %w", pName, err)
+		return fmt.Errorf("no PSK stored for profile %q — run `vpn init` or `vpn profile add`: %w", pName, err)
 	}
 	password, err := keychain.GetPassword(pName, aName)
 	if err != nil {
-		return fmt.Errorf("no password stored for account %q — run `l2tp-cli account add`: %w", aName, err)
+		return fmt.Errorf("no password stored for account %q — run `vpn account add`: %w", aName, err)
 	}
 
 	return engine.Connect(engine.Config{
@@ -71,9 +71,6 @@ func cmdConnect(args []string) error {
 }
 
 func cmdDisconnect(args []string) error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("disconnect must run as root — try: sudo l2tp-cli disconnect")
-	}
 	return engine.Disconnect()
 }
 
@@ -109,9 +106,6 @@ func cmdStatus(args []string) error {
 }
 
 func cmdRepair(args []string) error {
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("repair must run as root — try: sudo l2tp-cli repair")
-	}
 	// repair must work without credentials — it only restores routing/DNS
 	// state, it never (re)negotiates the tunnel.
 	return engine.Repair()
@@ -126,16 +120,21 @@ func cmdLogs(args []string) error {
 	if _, err := os.Stat(logPath); err != nil {
 		return fmt.Errorf("no log file yet at %s (nothing has connected)", logPath)
 	}
-	if *follow {
-		c := exec.Command("tail", "-f", logPath)
-		c.Stdout = os.Stdout
-		c.Stderr = os.Stderr
-		return c.Run()
-	}
-	data, err := os.ReadFile(logPath)
-	if err != nil {
-		return err
-	}
-	os.Stdout.Write(data)
-	return nil
+	// The log file is 0600, owned by whoever ran `connect` (root, via
+	// privilege.Elevate) — a plain unprivileged read would fail with
+	// permission denied, so briefly elevate just to read/tail it.
+	return privilege.Elevate(func() error {
+		if *follow {
+			c := exec.Command(pathTail, "-f", logPath)
+			c.Stdout = os.Stdout
+			c.Stderr = os.Stderr
+			return c.Run()
+		}
+		data, err := os.ReadFile(logPath)
+		if err != nil {
+			return err
+		}
+		os.Stdout.Write(data)
+		return nil
+	})
 }

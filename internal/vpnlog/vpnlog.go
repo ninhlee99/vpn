@@ -65,7 +65,14 @@ func (f Fields) String() string {
 	return s
 }
 
+// Info logs a status milestone (e.g. "IKE Phase 1 established"). Only
+// written when verbose is on — normal runs stay quiet in the log file
+// unless something actually goes wrong (see Error), so a long-lived
+// `connect` doesn't grow the log file forever for no reason.
 func Info(stage, msg string, f Fields) {
+	if !verbose {
+		return
+	}
 	ensure()
 	logger.Printf("[%s] %s%s", stage, msg, f.String())
 }

@@ -1,4 +1,4 @@
-module github.com/ninhlee99/vpn-l2tp
+module vpn
 
 go 1.27.1
 

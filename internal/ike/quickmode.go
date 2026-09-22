@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/ninhlee99/vpn-l2tp/internal/vpnlog"
+	"vpn/internal/vpnlog"
 )
 
 // IPsec DOI (RFC 2407) protocol identifiers and ESP transform IDs.
