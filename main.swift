@@ -288,42 +288,37 @@ final class VPNManager: ObservableObject {
     }
 }
 
-// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60/120fps Metal-accelerated)
+// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60/120fps)
 
 struct RotatingLinearBorder: View {
     var isConnecting: Bool
     var isConnected: Bool
     var cornerRadius: CGFloat = 13
-    @State private var isSpinning = false
+    @State private var rotation: Double = 0
 
     var body: some View {
-        ZStack {
-            Rectangle()
-                .fill(
-                    AngularGradient(
-                        gradient: Gradient(colors: isConnecting
-                            ? [Color.clear, Color.clear, Color.orange.opacity(0.15), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
-                            : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.15), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
-                        ),
-                        center: .center
-                    )
-                )
-                .scaleEffect(2.2)
-                .rotationEffect(.degrees(isSpinning ? 360 : 0))
-                .animation(Animation.linear(duration: 2.8).repeatForever(autoreverses: false), value: isSpinning)
-                .mask(
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .stroke(lineWidth: 1.8)
-                )
-        }
-        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
-        .shadow(
-            color: isConnecting ? Color.orange.opacity(0.6) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.6),
-            radius: 8
-        )
-        .onAppear {
-            isSpinning = true
-        }
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .stroke(
+                AngularGradient(
+                    gradient: Gradient(colors: isConnecting
+                        ? [Color.clear, Color.clear, Color.orange.opacity(0.2), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
+                        : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.2), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
+                    ),
+                    center: .center,
+                    startAngle: .degrees(rotation),
+                    endAngle: .degrees(rotation + 360)
+                ),
+                lineWidth: 2
+            )
+            .shadow(
+                color: isConnecting ? Color.orange.opacity(0.55) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.55),
+                radius: 7
+            )
+            .onAppear {
+                withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
+                    rotation = 360
+                }
+            }
     }
 }
 
