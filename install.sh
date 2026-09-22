@@ -42,7 +42,9 @@ if curl -fsSL -o "$BIN" "$URL"; then
     echo "$OWNER_UID" | sudo tee /etc/vpn-owner-uid >/dev/null
     sudo chown root:wheel /etc/vpn-owner-uid
     sudo chmod 600 /etc/vpn-owner-uid
-    echo "  -> CLI Installed: /usr/local/bin/vpn"
+    echo "  -> CLI Installed: /usr/local/bin/vpn ($(vpn version 2>/dev/null || echo 'OK'))"
+else
+    echo "⚠️ Warning: Could not download prebuilt release CLI. Skipping CLI download."
 fi
 
 # --- Step 2: Build & Install Swift Menu Bar UI ---
@@ -51,9 +53,21 @@ APP_DIR="/Applications/TMS-VPN.app"
 SWIFT_SRC="$(mktemp -t vpn-swift-src).swift"
 UI_BIN="$(mktemp -t vpn-ui-bin)"
 
-REPO_RAW="https://raw.githubusercontent.com/ninhlee99/vpn/main"
 echo "  -> Fetching main.swift..."
-curl -fsSL "${REPO_RAW}/main.swift" -o "$SWIFT_SRC"
+DOWNLOADED=false
+for ref in "${BRANCH:-}" "feat/menubar-ui-and-installer" "main" "master"; do
+    [ -z "$ref" ] && continue
+    if curl -fsSL "https://raw.githubusercontent.com/ninhlee99/vpn/${ref}/main.swift" -o "$SWIFT_SRC" 2>/dev/null; then
+        echo "  -> Fetched main.swift from ref: ${ref}"
+        DOWNLOADED=true
+        break
+    fi
+done
+
+if [ "$DOWNLOADED" = false ]; then
+    echo "❌ Error: Could not download main.swift from repository." >&2
+    exit 1
+fi
 
 if command -v swiftc &>/dev/null; then
     echo "  -> Compiling native Swift Menu Bar UI ($ARCH)..."

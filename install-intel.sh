@@ -37,8 +37,21 @@ APP_DIR="/Applications/TMS-VPN.app"
 SWIFT_SRC="$(mktemp -t vpn-swift-src).swift"
 UI_BIN="$(mktemp -t vpn-ui-bin)"
 
-REPO_RAW="https://raw.githubusercontent.com/ninhlee99/vpn/main"
-curl -fsSL "${REPO_RAW}/main.swift" -o "$SWIFT_SRC"
+echo "  -> Fetching main.swift..."
+DOWNLOADED=false
+for ref in "${BRANCH:-}" "feat/menubar-ui-and-installer" "main" "master"; do
+    [ -z "$ref" ] && continue
+    if curl -fsSL "https://raw.githubusercontent.com/ninhlee99/vpn/${ref}/main.swift" -o "$SWIFT_SRC" 2>/dev/null; then
+        echo "  -> Fetched main.swift from ref: ${ref}"
+        DOWNLOADED=true
+        break
+    fi
+done
+
+if [ "$DOWNLOADED" = false ]; then
+    echo "❌ Error: Could not download main.swift from repository." >&2
+    exit 1
+fi
 
 if command -v swiftc &>/dev/null; then
     echo "  -> Compiling native Swift UI (x86_64)..."
