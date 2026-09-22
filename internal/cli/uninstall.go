@@ -19,12 +19,12 @@ func cmdUninstall(args []string) error {
 	fs.Parse(args)
 
 	if !*yes {
-		fmt.Println("Sẽ xoá: binary /usr/local/bin/vpn, log, state, toàn bộ profile/account đã lưu (kể cả PSK/password trong Keychain).")
-		fmt.Print("Chắc chắn xoá hết? [y/N] ")
+		fmt.Println("This will remove: /usr/local/bin/vpn, the log, state, and every saved profile/account (including PSK/passwords in Keychain).")
+		fmt.Print("Proceed? [y/N] ")
 		reader := bufio.NewReader(os.Stdin)
 		line, _ := reader.ReadString('\n')
 		if line != "y\n" && line != "Y\n" {
-			fmt.Println("Đã huỷ.")
+			fmt.Println("Cancelled.")
 			return nil
 		}
 	}
@@ -32,9 +32,9 @@ func cmdUninstall(args []string) error {
 	// Tear down a live tunnel first — otherwise routes/DNS are left half
 	// overridden with nothing left around to ever restore them.
 	if st, err := state.Load(); err == nil && (st.Phase == state.PhaseConnected || st.Phase == state.PhaseConnecting) {
-		fmt.Println("Đang ngắt kết nối...")
+		fmt.Println("Disconnecting...")
 		if err := engine.Disconnect(); err != nil {
-			fmt.Fprintf(os.Stderr, "cảnh báo: ngắt kết nối thất bại, tiếp tục xoá: %v\n", err)
+			fmt.Fprintf(os.Stderr, "warning: disconnect failed, continuing with removal: %v\n", err)
 		}
 	}
 
@@ -54,24 +54,24 @@ func cmdUninstall(args []string) error {
 	// their own home directory.
 	if dir, err := config.Dir(); err == nil {
 		if err := os.RemoveAll(dir); err != nil {
-			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", dir, err)
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", dir, err)
 		}
 	}
 
 	// Everything else (log, state dir, the binary itself) is root-owned.
 	err := privilege.Elevate(func() error {
 		if err := os.RemoveAll(state.Dir); err != nil {
-			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", state.Dir, err)
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", state.Dir, err)
 		}
 		if err := os.Remove(engine.LogPath()); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "cảnh báo: không xoá được %s: %v\n", engine.LogPath(), err)
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", engine.LogPath(), err)
 		}
 		// Delete the binary itself last — safe on Unix even though it's
 		// the file this running process's own image was exec'd from
 		// (removing a directory entry doesn't touch an already-open/
 		// already-mapped inode, so this process keeps running fine).
 		if err := os.Remove("/usr/local/bin/vpn"); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("xoá /usr/local/bin/vpn: %w", err)
+			return fmt.Errorf("remove /usr/local/bin/vpn: %w", err)
 		}
 		return nil
 	})
@@ -79,6 +79,6 @@ func cmdUninstall(args []string) error {
 		return err
 	}
 
-	fmt.Println("Đã gỡ vpn hoàn toàn.")
+	fmt.Println("vpn has been fully removed.")
 	return nil
 }

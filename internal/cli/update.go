@@ -43,7 +43,7 @@ func cmdUpdate(args []string) error {
 			return fmt.Errorf("determine current git branch: %w", err)
 		}
 		branch = strings.TrimSpace(branch)
-		fmt.Println("Đang git pull...")
+		fmt.Println("Pulling latest changes...")
 		// Explicit "origin <branch>", not a bare `git pull` — that only
 		// works if the local branch has upstream tracking configured,
 		// which isn't guaranteed (e.g. a branch pushed with `git push
@@ -51,17 +51,17 @@ func cmdUpdate(args []string) error {
 		out, err := runIn(SourceDir, "git", "pull", "--ff-only", "origin", branch)
 		fmt.Print(out)
 		if err != nil {
-			return fmt.Errorf("git pull thất bại: %w", err)
+			return fmt.Errorf("git pull failed: %w", err)
 		}
 	}
 
 	version := gitVersion(SourceDir)
-	fmt.Printf("Đang build %s...\n", version)
+	fmt.Printf("Building %s...\n", version)
 	buildOut := filepath.Join(os.TempDir(), "vpn-update-build")
 	ldflags := fmt.Sprintf("-X main.version=%s -X main.sourceDir=%s -X main.allowedUID=%s", version, SourceDir, AllowedUID)
 	if out, err := runIn(SourceDir, "go", "build", "-ldflags", ldflags, "-o", buildOut, "./cmd/vpn"); err != nil {
 		fmt.Print(out)
-		return fmt.Errorf("build thất bại: %w", err)
+		return fmt.Errorf("build failed: %w", err)
 	}
 	defer os.Remove(buildOut)
 
@@ -69,10 +69,10 @@ func cmdUpdate(args []string) error {
 	if err := privilege.Elevate(func() error {
 		return installBinary(buildOut, installPath)
 	}); err != nil {
-		return fmt.Errorf("cài bản mới vào %s thất bại: %w", installPath, err)
+		return fmt.Errorf("installing new build to %s failed: %w", installPath, err)
 	}
 
-	fmt.Printf("Đã cập nhật lên %s.\n", version)
+	fmt.Printf("Updated to %s.\n", version)
 	return nil
 }
 
