@@ -18,16 +18,19 @@
   }
 
   @keyframes spin-border {
-    0% {
-      transform: rotate(0deg);
+    from {
+      transform: rotate(0deg) translateZ(0);
     }
-    100% {
-      transform: rotate(360deg);
+    to {
+      transform: rotate(360deg) translateZ(0);
     }
   }
 
   .animate-spin-slow {
-    animation: spin-border 3s linear infinite;
+    animation: spin-border 2.8s linear infinite;
+    will-change: transform;
+    transform-origin: center center;
+    backface-visibility: hidden;
   }
 }
 

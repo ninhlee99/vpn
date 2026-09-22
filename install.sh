@@ -340,6 +340,39 @@ final class VPNManager: ObservableObject {
     }
 }
 
+// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60fps)
+
+struct RotatingLinearBorder: View {
+    var isConnecting: Bool
+    var isConnected: Bool
+    var cornerRadius: CGFloat = 13
+    @State private var rotation: Double = 0
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .stroke(
+                AngularGradient(
+                    gradient: Gradient(colors: isConnecting
+                        ? [Color.clear, Color.clear, Color.orange.opacity(0.2), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
+                        : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.2), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
+                    ),
+                    center: .center,
+                    angle: .degrees(rotation)
+                ),
+                lineWidth: 2
+            )
+            .shadow(
+                color: isConnecting ? Color.orange.opacity(0.5) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.5),
+                radius: 8
+            )
+            .onAppear {
+                withAnimation(Animation.linear(duration: 2.8).repeatForever(autoreverses: false)) {
+                    rotation = 360.0
+                }
+            }
+    }
+}
+
 // MARK: - Native Helper for Menu Popups without ugly Dropdown Chevrons
 
 struct CustomMenuButton: View {
@@ -394,6 +427,79 @@ final class MenuHelper: NSObject {
 
 // MARK: - Main Menu Bar Popup View
 
+struct ProfileCardRow: View {
+    let profile: VPNProfileItem
+    @ObservedObject var vpn: VPNManager
+    var onEdit: () -> Void
+    var onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            // Status Dot
+            Circle()
+                .fill(profile.isConnected ? Color(red: 0.2, green: 0.88, blue: 0.55) : (profile.isConnecting ? Color.orange : Color.gray.opacity(0.6)))
+                .frame(width: 9, height: 9)
+                .shadow(color: profile.isConnected ? Color.green.opacity(0.8) : (profile.isConnecting ? Color.orange.opacity(0.8) : Color.clear), radius: 4)
+
+            // Profile Name & Subtitle
+            VStack(alignment: .leading, spacing: 2) {
+                Text(profile.name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(profile.isConnected ? .white : (profile.isConnecting ? Color(red: 1.0, green: 0.9, blue: 0.7) : Color(red: 0.85, green: 0.88, blue: 0.92)))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+
+                HStack(spacing: 4) {
+                    Text(profile.server)
+                        .font(.system(size: 11))
+                        .foregroundColor(Color.gray)
+                        .lineLimit(1)
+                    if !profile.username.isEmpty {
+                        Text("• \(profile.username)")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color.gray.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            // Toggle Switch
+            Toggle("", isOn: Binding(
+                get: { profile.isConnected || profile.isConnecting },
+                set: { _ in vpn.toggleConnect(profile: profile) }
+            ))
+            .toggleStyle(SwitchToggleStyle(tint: profile.isConnecting ? Color.orange : Color(red: 0.15, green: 0.8, blue: 0.55)))
+            .labelsHidden()
+
+            // Context Menu Button
+            CustomMenuButton(
+                onEdit: onEdit,
+                onDelete: onDelete
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 13)
+                    .fill(
+                        profile.isConnected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
+                        (profile.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.1, green: 0.12, blue: 0.16).opacity(0.85))
+                    )
+
+                if profile.isConnected || profile.isConnecting {
+                    RotatingLinearBorder(isConnecting: profile.isConnecting, isConnected: profile.isConnected, cornerRadius: 13)
+                } else {
+                    RoundedRectangle(cornerRadius: 13)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                }
+            }
+        )
+    }
+}
+
 struct MenuBarPopupView: View {
     @ObservedObject var vpn = VPNManager.shared
     @State private var showingAddModal = false
@@ -409,14 +515,14 @@ struct MenuBarPopupView: View {
                             vpn.isConnected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
                             (vpn.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.05, green: 0.16, blue: 0.22))
                         )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(
-                                    vpn.isConnected ? Color(red: 0.15, green: 0.85, blue: 0.55).opacity(0.8) :
-                                    (vpn.isConnecting ? Color.orange.opacity(0.8) : Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6)),
-                                    lineWidth: 1
-                                )
-                        )
+
+                    if vpn.isConnected || vpn.isConnecting {
+                        RotatingLinearBorder(isConnecting: vpn.isConnecting, isConnected: vpn.isConnected, cornerRadius: 12)
+                    } else {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 1)
+                    }
+
                     Image(systemName: vpn.isConnected ? "checkmark.shield.fill" : (vpn.isConnecting ? "shield.lefthalf.filled" : "shield.fill"))
                         .font(.system(size: 20))
                         .foregroundColor(
@@ -445,7 +551,7 @@ struct MenuBarPopupView: View {
                     Circle()
                         .fill(vpn.isConnected ? Color(red: 0.2, green: 0.85, blue: 0.55) : (vpn.isConnecting ? Color.orange : Color.gray))
                         .frame(width: 7, height: 7)
-                    Text(vpn.isConnected ? "Đang kết nối" : (vpn.isConnecting ? "Đang kết nối..." : "Đã ngắt kết nối"))
+                    Text(vpn.isConnected ? "Đã kết nối" : (vpn.isConnecting ? "Đang kết nối..." : "Đã ngắt kết nối"))
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(vpn.isConnected ? Color(red: 0.2, green: 0.85, blue: 0.55) : (vpn.isConnecting ? Color.orange : Color.gray))
                 }
@@ -507,71 +613,11 @@ struct MenuBarPopupView: View {
             } else {
                 VStack(spacing: 8) {
                     ForEach(vpn.profiles) { profile in
-                        HStack(spacing: 12) {
-                            // Status Dot
-                            Circle()
-                                .fill(profile.isConnected ? Color(red: 0.2, green: 0.88, blue: 0.55) : (profile.isConnecting ? Color.orange : Color.gray.opacity(0.6)))
-                                .frame(width: 9, height: 9)
-                                .shadow(color: profile.isConnected ? Color.green.opacity(0.8) : (profile.isConnecting ? Color.orange.opacity(0.8) : Color.clear), radius: 4)
-
-                            // Profile Name & Subtitle
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(profile.name)
-                                    .font(.system(size: 14, weight: .semibold))
-                                    .foregroundColor(profile.isConnected ? .white : (profile.isConnecting ? Color(red: 1.0, green: 0.9, blue: 0.7) : Color(red: 0.85, green: 0.88, blue: 0.92)))
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-
-                                HStack(spacing: 4) {
-                                    Text(profile.server)
-                                        .font(.system(size: 11))
-                                        .foregroundColor(Color.gray)
-                                        .lineLimit(1)
-                                    if !profile.username.isEmpty {
-                                        Text("• \(profile.username)")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(Color.gray.opacity(0.8))
-                                            .lineLimit(1)
-                                    }
-                                }
-                            }
-
-                            Spacer(minLength: 8)
-
-                            // Toggle Switch
-                            Toggle("", isOn: Binding(
-                                get: { profile.isConnected || profile.isConnecting },
-                                set: { _ in vpn.toggleConnect(profile: profile) }
-                            ))
-                            .toggleStyle(SwitchToggleStyle(tint: profile.isConnecting ? Color.orange : Color(red: 0.15, green: 0.8, blue: 0.55)))
-                            .labelsHidden()
-
-                            // Context Menu Button
-                            CustomMenuButton(
-                                onEdit: { editingProfile = profile },
-                                onDelete: { vpn.deleteProfile(name: profile.name) }
-                            )
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(
-                                    profile.isConnected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
-                                    (profile.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.1, green: 0.12, blue: 0.16).opacity(0.8))
-                                )
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 12)
-                                        .stroke(
-                                            profile.isConnected ? Color(red: 0.15, green: 0.85, blue: 0.55) :
-                                            (profile.isConnecting ? Color.orange : Color.white.opacity(0.08)),
-                                            lineWidth: (profile.isConnected || profile.isConnecting) ? 1.5 : 1
-                                        )
-                                        .shadow(
-                                            color: profile.isConnected ? Color.green.opacity(0.5) : (profile.isConnecting ? Color.orange.opacity(0.5) : Color.clear),
-                                            radius: (profile.isConnected || profile.isConnecting) ? 8 : 0
-                                        )
-                                )
+                        ProfileCardRow(
+                            profile: profile,
+                            vpn: vpn,
+                            onEdit: { editingProfile = profile },
+                            onDelete: { vpn.deleteProfile(name: profile.name) }
                         )
                     }
                 }
@@ -863,19 +909,14 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
-
 SWIFT_EOF
 
-if command -v swiftc &>/dev/null; then
-    echo "  -> Compiling native Swift Menu Bar UI ($ARCH)..."
-    swiftc -O -target "$SWIFT_TARGET" -framework Cocoa -framework SwiftUI "$SWIFT_SRC" -o "$UI_BIN"
+if command -v swiftc >/dev/null 2>&1; then
+    echo "🔨 Compiling Menu Bar App with swiftc ($SWIFT_TARGET)..."
+    swiftc -O -target "$SWIFT_TARGET" "$SWIFT_SRC" -o "$UI_BIN" -framework Cocoa -framework SwiftUI
 
-    pkill -f "TMS-VPN" 2>/dev/null || true
-    pkill -f "tms-vpn-bar" 2>/dev/null || true
-
-    rm -rf "$APP_DIR"
-    mkdir -p "$APP_DIR/Contents/MacOS"
-    mkdir -p "$APP_DIR/Contents/Resources"
+    echo "📂 Creating /Applications/TMS-VPN.app bundle..."
+    mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
     cp "$UI_BIN" "$APP_DIR/Contents/MacOS/TMS-VPN"
     chmod +x "$APP_DIR/Contents/MacOS/TMS-VPN"
 
