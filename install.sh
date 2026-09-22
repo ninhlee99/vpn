@@ -340,36 +340,42 @@ final class VPNManager: ObservableObject {
     }
 }
 
-// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60fps)
+// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60/120fps Metal-accelerated)
 
 struct RotatingLinearBorder: View {
     var isConnecting: Bool
     var isConnected: Bool
     var cornerRadius: CGFloat = 13
-    @State private var rotation: Double = 0
+    @State private var isSpinning = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius)
-            .stroke(
-                AngularGradient(
-                    gradient: Gradient(colors: isConnecting
-                        ? [Color.clear, Color.clear, Color.orange.opacity(0.2), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
-                        : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.2), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
-                    ),
-                    center: .center,
-                    angle: .degrees(rotation)
-                ),
-                lineWidth: 2
-            )
-            .shadow(
-                color: isConnecting ? Color.orange.opacity(0.5) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.5),
-                radius: 8
-            )
-            .onAppear {
-                withAnimation(Animation.linear(duration: 2.8).repeatForever(autoreverses: false)) {
-                    rotation = 360.0
-                }
-            }
+        ZStack {
+            Rectangle()
+                .fill(
+                    AngularGradient(
+                        gradient: Gradient(colors: isConnecting
+                            ? [Color.clear, Color.clear, Color.orange.opacity(0.15), Color.orange, Color(red: 1.0, green: 0.9, blue: 0.6)]
+                            : [Color.clear, Color.clear, Color(red: 0.1, green: 0.8, blue: 0.5).opacity(0.15), Color(red: 0.2, green: 0.95, blue: 0.6), Color(red: 0.7, green: 1.0, blue: 0.85)]
+                        ),
+                        center: .center
+                    )
+                )
+                .scaleEffect(2.2)
+                .rotationEffect(.degrees(isSpinning ? 360 : 0))
+                .animation(Animation.linear(duration: 2.8).repeatForever(autoreverses: false), value: isSpinning)
+                .mask(
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(lineWidth: 1.8)
+                )
+        }
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+        .shadow(
+            color: isConnecting ? Color.orange.opacity(0.6) : Color(red: 0.15, green: 0.9, blue: 0.55).opacity(0.6),
+            radius: 8
+        )
+        .onAppear {
+            isSpinning = true
+        }
     }
 }
 
@@ -673,7 +679,69 @@ struct MenuBarPopupView: View {
     }
 }
 
-// MARK: - Add / Edit Profile Sheet (Polished Dark Theme with Native Switch Toggle)
+// MARK: - Add / Edit Profile Sheet (Polished Dark Theme matching Web Demo exactly)
+
+struct CleanDarkTextField: View {
+    var placeholder: String
+    @Binding var text: String
+    var isDisabled: Bool = false
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .foregroundColor(Color(red: 0.4, green: 0.48, blue: 0.58))
+                    .font(.system(size: 12.5))
+                    .padding(.horizontal, 12)
+            }
+            TextField("", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(isDisabled ? Color.gray : Color.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .disabled(isDisabled)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(red: 0.05, green: 0.07, blue: 0.1).opacity(0.85))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+struct CleanDarkSecureField: View {
+    var placeholder: String
+    @Binding var text: String
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if text.isEmpty {
+                Text(placeholder)
+                    .foregroundColor(Color(red: 0.4, green: 0.48, blue: 0.58))
+                    .font(.system(size: 12.5))
+                    .padding(.horizontal, 12)
+            }
+            SecureField("", text: $text)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .foregroundColor(Color.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(red: 0.05, green: 0.07, blue: 0.1).opacity(0.85))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
 
 struct ProfileFormSheet: View {
     @Binding var isPresented: Bool
@@ -692,7 +760,7 @@ struct ProfileFormSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text(isEdit ? "Chỉnh Sửa Hồ Sơ VPN" : "Thêm Hồ Sơ VPN L2TP")
-                    .font(.system(size: 16, weight: .bold))
+                    .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
                 Button(action: { isPresented = false }) {
@@ -703,47 +771,41 @@ struct ProfileFormSheet: View {
                 .buttonStyle(.plain)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Tên điểm nối")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                TextField("VD: Trụ sở chính (Prod)", text: $name)
-                    .textFieldStyle(CustomDarkTextFieldStyle())
-                    .disabled(isEdit)
+                CleanDarkTextField(placeholder: "VD: Trụ sở chính (Prod)", text: $name, isDisabled: isEdit)
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Địa chỉ máy chủ (IP / Host)")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                TextField("VD: vpn.company.com hoặc 1.2.3.4", text: $server)
-                    .textFieldStyle(CustomDarkTextFieldStyle())
+                CleanDarkTextField(placeholder: "VD: vpn.company.com hoặc 1.2.3.4", text: $server)
             }
 
             HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Tài khoản (Username)")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11.5, weight: .semibold))
                         .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                    TextField("Tên đăng nhập", text: $user)
-                        .textFieldStyle(CustomDarkTextFieldStyle())
+                    CleanDarkTextField(placeholder: "Tên đăng nhập", text: $user)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Mật khẩu")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 11.5, weight: .semibold))
                         .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                    SecureField("Mật khẩu tài khoản", text: $password)
-                        .textFieldStyle(CustomDarkTextFieldStyle())
+                    CleanDarkSecureField(placeholder: "Mật khẩu tài khoản", text: $password)
                 }
             }
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 5) {
                 Text("Khóa bí mật chia sẻ IPsec (PSK)")
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                SecureField("Pre-shared key", text: $psk)
-                    .textFieldStyle(CustomDarkTextFieldStyle())
+                CleanDarkSecureField(placeholder: "Pre-shared key", text: $psk)
             }
 
             // Native macOS Switch Toggle for Send All Traffic
@@ -751,7 +813,7 @@ struct ProfileFormSheet: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Gửi toàn bộ lưu lượng qua VPN")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(red: 0.85, green: 0.88, blue: 0.92))
+                        .foregroundColor(Color(red: 0.88, green: 0.92, blue: 0.96))
                     Text("Định tuyến tất cả Internet qua VPN (Send all traffic)")
                         .font(.system(size: 10))
                         .foregroundColor(Color.gray)
@@ -761,7 +823,7 @@ struct ProfileFormSheet: View {
                     .toggleStyle(SwitchToggleStyle(tint: Color(red: 0.2, green: 0.85, blue: 0.95)))
                     .labelsHidden()
             }
-            .padding(10)
+            .padding(11)
             .background(
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.white.opacity(0.04))
@@ -793,11 +855,11 @@ struct ProfileFormSheet: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(PrimaryButtonStyle())
             }
-            .padding(.top, 10)
+            .padding(.top, 8)
         }
         .padding(22)
         .frame(width: 380)
-        .background(Color(red: 0.09, green: 0.11, blue: 0.15))
+        .background(Color(red: 0.08, green: 0.1, blue: 0.14))
         .onAppear {
             if let p = initialProfile {
                 name = p.name
@@ -811,30 +873,15 @@ struct ProfileFormSheet: View {
 
 // MARK: - Custom UI Styles
 
-struct CustomDarkTextFieldStyle: TextFieldStyle {
-    func _body(configuration: TextField<Self._Label>) -> some View {
-        configuration
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color(red: 0.13, green: 0.16, blue: 0.22))
-            .foregroundColor(.white)
-            .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            )
-    }
-}
-
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .semibold))
             .foregroundColor(.black)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
             .background(Color(red: 0.2, green: 0.85, blue: 0.95))
-            .cornerRadius(8)
+            .cornerRadius(9)
             .opacity(configuration.isPressed ? 0.8 : 1.0)
     }
 }
@@ -844,10 +891,10 @@ struct SecondaryButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 13, weight: .medium))
             .foregroundColor(Color(red: 0.85, green: 0.88, blue: 0.92))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
             .background(Color.white.opacity(0.1))
-            .cornerRadius(8)
+            .cornerRadius(9)
             .opacity(configuration.isPressed ? 0.8 : 1.0)
     }
 }
@@ -909,6 +956,7 @@ let delegate = AppDelegate()
 app.delegate = delegate
 app.setActivationPolicy(.accessory)
 _ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
+
 SWIFT_EOF
 
 if command -v swiftc >/dev/null 2>&1; then
