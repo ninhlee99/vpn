@@ -46,10 +46,11 @@ lệnh này sẽ bị từ chối ngay lập tức, kể cả các lệnh không
 ## Nhiều server / nhiều account
 
 ```bash
-vpn profile add <tên> --server <host>     # thêm server khác
-vpn profile use <tên>                     # chuyển server đang dùng
-vpn account add <profile> <username>      # thêm account cho 1 server
-vpn account use <profile> <username>      # chuyển account đang dùng
+vpn profile add <tên> --server <host>       # thêm server khác
+vpn profile use <tên>                       # chuyển server đang dùng
+vpn profile rename <tên cũ> <tên mới>       # đổi tên profile (PSK/password trong Keychain tự chuyển theo)
+vpn account add <profile> <username>        # thêm account cho 1 server
+vpn account use <profile> <username>        # chuyển account đang dùng
 ```
 
 Không truyền `--profile`/`--account` cho `connect` thì CLI tự dùng cái đang được `use`.

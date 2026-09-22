@@ -78,6 +78,7 @@ Usage:
   vpn profile list
   vpn profile use <name>
   vpn profile remove <name>
+  vpn profile rename <old-name> <new-name>
   vpn account add <profile> <account> [--default]
   vpn account list <profile>
   vpn account use <profile> <account>
@@ -162,7 +163,7 @@ func cmdInit(args []string) error {
 
 func cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vpn profile <add|list|use|remove> ...")
+		return fmt.Errorf("usage: vpn profile <add|list|use|remove|rename> ...")
 	}
 	switch args[0] {
 	case "add":
@@ -173,6 +174,8 @@ func cmdProfile(args []string) error {
 		return cmdProfileUse(args[1:])
 	case "remove":
 		return cmdProfileRemove(args[1:])
+	case "rename":
+		return cmdProfileRename(args[1:])
 	default:
 		return fmt.Errorf("unknown `profile` subcommand %q", args[0])
 	}
@@ -285,6 +288,59 @@ func cmdProfileRemove(args []string) error {
 		return err
 	}
 	fmt.Printf("Profile %q removed.\n", args[0])
+	return nil
+}
+
+func cmdProfileRename(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: vpn profile rename <old-name> <new-name>")
+	}
+	oldName, newName := args[0], args[1]
+	if oldName == newName {
+		return fmt.Errorf("new name is the same as the old one")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	p, ok := cfg.Profiles[oldName]
+	if !ok {
+		return fmt.Errorf("unknown profile %q", oldName)
+	}
+	if _, exists := cfg.Profiles[newName]; exists {
+		return fmt.Errorf("a profile named %q already exists", newName)
+	}
+
+	// Keychain items are keyed by profile name, so a rename has to move
+	// them too — a bare config-key rename would silently orphan the
+	// PSK/passwords under the old name (connect would then find nothing).
+	if psk, err := keychain.GetPSK(oldName); err == nil {
+		if err := keychain.SetPSK(newName, psk); err != nil {
+			return fmt.Errorf("move PSK to %q: %w", newName, err)
+		}
+		_ = keychain.DeletePSK(oldName)
+	}
+	for acct := range p.Accounts {
+		password, err := keychain.GetPassword(oldName, acct)
+		if err != nil {
+			continue // no stored password for this account — nothing to move
+		}
+		if err := keychain.SetPassword(newName, acct, password); err != nil {
+			return fmt.Errorf("move password for %q to %q: %w", acct, newName, err)
+		}
+		_ = keychain.DeletePassword(oldName, acct)
+	}
+
+	delete(cfg.Profiles, oldName)
+	cfg.Profiles[newName] = p
+	if cfg.ActiveProfile == oldName {
+		cfg.ActiveProfile = newName
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("Profile %q renamed to %q.\n", oldName, newName)
 	return nil
 }
 
