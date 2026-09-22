@@ -31,18 +31,12 @@ CLI sẽ hỏi server, username, PSK, password rồi tự lưu vào Keychain.
 ## Dùng hằng ngày
 
 ```bash
-vpn connect      # kết nối, giữ chạy tới khi Ctrl-C — không cần sudo
-vpn disconnect   # ngắt (gõ từ terminal khác)
-vpn status       # xem đang connected hay chưa
+vpn connect       # kết nối, tự chạy nền — trả lại terminal ngay khi biết kết quả, không cần sudo
+vpn disconnect    # ngắt
+vpn status        # xem đang connected hay chưa
 ```
 
-Muốn chạy nền thay vì giữ terminal: thêm `&` vào cuối lệnh connect.
-
-```bash
-vpn connect &
-```
-
-`disconnect` vẫn hoạt động bình thường dù connect chạy nền hay foreground.
+`vpn connect` luôn tự tách tiến trình chạy nền (không cần `&`) — lệnh chỉ đứng chờ tới khi biết chắc kết nối thành công hay thất bại rồi mới trả lại terminal, sau đó tiến trình vẫn tiếp tục chạy nền cho tới khi bạn `vpn disconnect`.
 
 ### Vì sao không cần sudo
 

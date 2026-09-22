@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"vpn/internal/config"
@@ -20,28 +21,91 @@ import (
 // routing.go/dnsmgr.go/keychain.go.
 const pathTail = "/usr/bin/tail"
 
+// daemonChildEnv marks a re-exec'd `connect` invocation as the detached
+// background process itself, so it runs the real connect logic in place
+// instead of re-spawning another daemon (which would otherwise recurse
+// forever) — see cmdConnect.
+const daemonChildEnv = "VPN_DAEMON_CHILD"
+
 func cmdConnect(args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	profileName := fs.String("profile", "", "profile to connect (default: active profile)")
 	accountName := fs.String("account", "", "account to use (default: profile's default account)")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall connect timeout")
 	verbose := fs.Bool("verbose", false, "verbose protocol logging")
+	// -d/--daemon are accepted but always on — connect always backgrounds
+	// itself now; the flags exist only so old scripts/muscle memory using
+	// `vpn connect -d` don't break.
+	fs.Bool("d", true, "run in background (default; kept for compatibility)")
+	fs.Bool("daemon", true, "alias of -d")
 	fs.Parse(args)
 
-	// No root check here: engine.Connect elevates internally (see
-	// internal/privilege) for exactly the steps that need it, and returns
-	// a clear error itself if this process can't (not root, not installed
-	// setuid via install.sh).
+	if os.Getenv(daemonChildEnv) == "1" {
+		return doConnect(*profileName, *accountName, *timeout, *verbose)
+	}
+	return spawnDaemon(args, *timeout)
+}
 
+// spawnDaemon re-execs this same binary as a detached background process
+// (new session via Setsid, stdio pointed at /dev/null so it survives the
+// parent's terminal closing) running the real connect logic, then polls
+// state until it reaches CONNECTED/FAILED (or timeout) so the caller gets
+// immediate feedback instead of a background process starting silently
+// with no way to tell whether it actually worked.
+func spawnDaemon(args []string, timeout time.Duration) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate own executable to re-exec as a daemon: %w", err)
+	}
+
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", os.DevNull, err)
+	}
+	defer devnull.Close()
+
+	cmd := exec.Command(exe, append([]string{"connect"}, args...)...)
+	cmd.Env = append(os.Environ(), daemonChildEnv+"=1")
+	cmd.Stdin = devnull
+	cmd.Stdout = devnull
+	cmd.Stderr = devnull
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from this terminal's session
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start background connect: %w", err)
+	}
+	fmt.Printf("Connecting in the background (pid %d)...\n", cmd.Process.Pid)
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(300 * time.Millisecond)
+		st, err := state.Load()
+		if err != nil {
+			continue
+		}
+		switch st.Phase {
+		case state.PhaseConnected:
+			fmt.Printf("Connected (local IP %s, device %s).\n", st.LocalIP, st.TunDevice)
+			return nil
+		case state.PhaseFailed:
+			return fmt.Errorf("%s: %s", st.FailStage, st.FailDetail)
+		}
+	}
+	fmt.Println("Still connecting in the background — check `vpn status` or `vpn logs -f`.")
+	return nil
+}
+
+// doConnect is the actual connect logic, run inside the detached daemon
+// process spawned by spawnDaemon (see daemonChildEnv).
+func doConnect(profileName, accountName string, timeout time.Duration, verbose bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	pName, p, err := cfg.Profile(*profileName)
+	pName, p, err := cfg.Profile(profileName)
 	if err != nil {
 		return err
 	}
-	aName, _, err := p.Account(*accountName)
+	aName, _, err := p.Account(accountName)
 	if err != nil {
 		return err
 	}
@@ -65,8 +129,8 @@ func cmdConnect(args []string) error {
 		ESPProposals: p.ESPProposals,
 		MTU:          p.MTU,
 		FullTunnel:   p.FullTunnel,
-		Timeout:      *timeout,
-		Verbose:      *verbose,
+		Timeout:      timeout,
+		Verbose:      verbose,
 	})
 }
 

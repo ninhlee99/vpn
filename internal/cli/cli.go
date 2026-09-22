@@ -83,7 +83,7 @@ Usage:
   vpn account list <profile>
   vpn account use <profile> <account>
   vpn diagnose [--profile name] [--server host] [--json]
-  vpn connect [--profile name] [--account name] [--timeout 30s]
+  vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose]  (always runs in the background)
   vpn disconnect
   vpn status [--json]
   vpn repair
