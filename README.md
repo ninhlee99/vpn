@@ -36,13 +36,12 @@ vpn connect &
 
 ### Vì sao không cần sudo
 
-`install.sh` cài `vpn` với setuid-root. Binary tự hạ quyền về user thường ngay
+`install.sh` cài `vpn` với setuid-root, đồng thời khoá cứng UID của người vừa
+chạy `install.sh` ngay trong binary. Binary tự hạ quyền về user thường ngay
 khi khởi động, chỉ tạm nâng lại quyền root đúng lúc thật sự cần (mở utun, bind
 UDP/500, đổi route/DNS) rồi hạ ngay sau đó — không giữ quyền root suốt phiên
-kết nối. Đây là đánh đổi có chủ đích: **mọi user trên máy đều gọi được `vpn`
-với quyền root** (không riêng người cài). Phù hợp cho máy cá nhân 1 người
-dùng; máy nhiều tài khoản thì cân nhắc kỹ hoặc bỏ setuid (`sudo chmod u-s
-/usr/local/bin/vpn`) và quay lại dùng `sudo vpn connect`.
+kết nối. **Chỉ đúng user đã cài mới gọi được `vpn`** — user khác trên máy chạy
+lệnh này sẽ bị từ chối ngay lập tức, kể cả các lệnh không cần quyền root.
 
 ## Nhiều server / nhiều account
 
@@ -61,4 +60,11 @@ Không truyền `--profile`/`--account` cho `connect` thì CLI tự dùng cái �
 vpn diagnose   # kiểm tra mạng trước khi connect, không đổi gì trên máy
 vpn repair     # dọn route/DNS nếu connect bị crash/kill giữa chừng
 vpn logs -f    # xem log
+```
+
+## Cập nhật / gỡ cài đặt
+
+```bash
+vpn update       # git pull + build lại + cài đè bản mới nhất (chỉ chạy được nếu cài qua install.sh)
+vpn uninstall    # xoá sạch: binary, log, state, toàn bộ profile/account (kể cả PSK/password trong Keychain)
 ```
