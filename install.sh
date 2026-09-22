@@ -318,18 +318,42 @@ final class VPNManager: ObservableObject {
         self.isStaleSession = false
         self.onStatusChanged?("CONNECTING")
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            // Pre-flight cleanup of old stale processes
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let cli = "/usr/local/bin/vpn"
+
+            // 1. Explicit Graceful Disconnect / Logout via CLI
+            let pDisc = Process()
+            pDisc.executableURL = URL(fileURLWithPath: cli)
+            pDisc.arguments = ["disconnect"]
+            try? pDisc.run()
+            pDisc.waitUntilExit()
+
+            // 2. Kill any remaining stale background L2TP/PPP processes
             let pKill = Process()
             pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
             pKill.arguments = ["-9", "vpn"]
             try? pKill.run()
             pKill.waitUntilExit()
 
+            // 3. Repair routing and DNS state
+            let pRep = Process()
+            pRep.executableURL = URL(fileURLWithPath: cli)
+            pRep.arguments = ["repair"]
+            try? pRep.run()
+            pRep.waitUntilExit()
+
+            // 4. Brief pause to allow peer server to flush session
+            Thread.sleep(forTimeInterval: 0.6)
+
+            // 5. Launch new connection
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            task.executableURL = URL(fileURLWithPath: cli)
             task.arguments = ["connect", "--profile", profileName]
             try? task.run()
+
+            Task { @MainActor in
+                self?.syncFromDisk()
+            }
         }
     }
 
@@ -338,36 +362,39 @@ final class VPNManager: ObservableObject {
         self.isConnecting = true
         self.currentPhase = "CONNECTING"
         self.activeProfileName = profileName
-        self.errorMessage = "Đang dọn dẹp phiên cũ & kết nối lại..."
+        self.errorMessage = "Đang đăng xuất phiên cũ & kết nối lại..."
         self.onStatusChanged?("CONNECTING")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // 1. Force kill any stale processes
+            let cli = "/usr/local/bin/vpn"
+
+            // 1. Explicit CLI Disconnect / Logout
+            let pDisc = Process()
+            pDisc.executableURL = URL(fileURLWithPath: cli)
+            pDisc.arguments = ["disconnect"]
+            try? pDisc.run()
+            pDisc.waitUntilExit()
+
+            // 2. Force kill all stale processes
             let pKill = Process()
             pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
             pKill.arguments = ["-9", "vpn"]
             try? pKill.run()
             pKill.waitUntilExit()
 
-            // 2. Disconnect and repair routing
-            let pDisc = Process()
-            pDisc.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
-            pDisc.arguments = ["disconnect"]
-            try? pDisc.run()
-            pDisc.waitUntilExit()
-
+            // 3. Repair routing / DNS
             let pRep = Process()
-            pRep.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            pRep.executableURL = URL(fileURLWithPath: cli)
             pRep.arguments = ["repair"]
             try? pRep.run()
             pRep.waitUntilExit()
 
-            // 3. Small pause to allow server RADIUS session cleanup
-            Thread.sleep(forTimeInterval: 1.2)
+            // 4. Give server 1.5s to flush RADIUS session
+            Thread.sleep(forTimeInterval: 1.5)
 
-            // 4. Connect again
+            // 5. Connect again
             let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            task.executableURL = URL(fileURLWithPath: cli)
             task.arguments = ["connect", "--profile", profileName]
             try? task.run()
 
