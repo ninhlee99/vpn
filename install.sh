@@ -94,6 +94,52 @@ struct VPNProfileItem: Identifiable, Hashable {
     var isConnecting: Bool
 }
 
+// MARK: - Status Bar Icon Generator
+
+func makeMenuBarIcon(phase: String) -> NSImage {
+    let size = NSSize(width: 18, height: 18)
+    let img = NSImage(size: size, flipped: false) { rect in
+        if phase == "CONNECTED" {
+            // Vibrant Green / Emerald Shield with active badge
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+            if let shield = NSImage(systemSymbolName: "checkmark.shield.fill", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+                NSColor(red: 0.15, green: 0.9, blue: 0.55, alpha: 1.0).set()
+                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
+            }
+            let badgeRect = NSRect(x: 12, y: 11, width: 5, height: 5)
+            let badgePath = NSBezierPath(ovalIn: badgeRect)
+            NSColor(red: 0.2, green: 0.98, blue: 0.65, alpha: 1.0).setFill()
+            badgePath.fill()
+            NSColor(red: 0.05, green: 0.3, blue: 0.15, alpha: 0.8).setStroke()
+            badgePath.lineWidth = 0.5
+            badgePath.stroke()
+        } else if phase == "CONNECTING" {
+            // Orange / Yellow Connecting Shield
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+            if let shield = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+                NSColor(red: 0.98, green: 0.7, blue: 0.15, alpha: 1.0).set()
+                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
+            }
+            let badgeRect = NSRect(x: 12, y: 11, width: 5, height: 5)
+            let badgePath = NSBezierPath(ovalIn: badgeRect)
+            NSColor.systemOrange.setFill()
+            badgePath.fill()
+        } else {
+            // Clean Disconnected Shield
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            if let shield = NSImage(systemSymbolName: "shield", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
+                NSColor.labelColor.withAlphaComponent(0.85).set()
+                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
+            }
+        }
+        return true
+    }
+    
+    // When connected or connecting, keep isTemplate = false so macOS preserves vivid RGB green/orange!
+    img.isTemplate = (phase == "DISCONNECTED")
+    return img
+}
+
 // MARK: - VPN Manager (Real CLI & File Sync)
 
 @MainActor
@@ -113,6 +159,7 @@ final class VPNManager: ObservableObject {
     @Published var autoConnectOnLaunch: Bool = false
     @Published var startAtLogin: Bool = true
 
+    var onStatusChanged: ((String) -> Void)?
     private var pollTimer: Timer?
 
     private var configURL: URL {
@@ -133,7 +180,7 @@ final class VPNManager: ObservableObject {
 
     func startPolling() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { [weak self] _ in
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.syncFromDisk()
             }
@@ -160,11 +207,16 @@ final class VPNManager: ObservableObject {
             }
         }
 
+        let oldPhase = self.currentPhase
         self.currentPhase = phase
         self.isConnected = (phase == "CONNECTED")
         self.isConnecting = (phase == "CONNECTING")
         self.currentIP = localIP
         self.currentTunDevice = tunDev
+
+        if oldPhase != phase || self.onStatusChanged != nil {
+            self.onStatusChanged?(phase)
+        }
 
         // 2. Read Config (~/.config/vpn/config.json)
         if let configData = try? Data(contentsOf: configURL),
@@ -193,7 +245,6 @@ final class VPNManager: ObservableObject {
             }
             self.profiles = items.sorted { $0.name.lowercased() < $1.name.lowercased() }
         } else {
-            // Fallback default sample profiles if config does not exist yet
             if self.profiles.isEmpty {
                 self.profiles = []
             }
@@ -210,8 +261,10 @@ final class VPNManager: ObservableObject {
 
     func connect(profileName: String) {
         self.isConnecting = true
+        self.currentPhase = "CONNECTING"
         self.activeProfileName = profileName
         self.errorMessage = nil
+        self.onStatusChanged?("CONNECTING")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
@@ -222,6 +275,11 @@ final class VPNManager: ObservableObject {
     }
 
     func disconnect() {
+        self.isConnecting = false
+        self.isConnected = false
+        self.currentPhase = "DISCONNECTED"
+        self.onStatusChanged?("DISCONNECTED")
+
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
@@ -842,20 +900,34 @@ struct SecondaryButtonStyle: ButtonStyle {
 // MARK: - App Delegate & Menu Bar Setup
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var shared: AppDelegate?
     var statusItem: NSStatusItem?
     var popover = NSPopover()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppDelegate.shared = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        guard let button = statusItem?.button else { return }
         
-        button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "TMS-VPN")
+        updateIcon(phase: VPNManager.shared.currentPhase)
+
+        guard let button = statusItem?.button else { return }
         button.action = #selector(togglePopover(_:))
         button.target = self
 
         popover.contentSize = NSSize(width: 370, height: 440)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
+
+        VPNManager.shared.onStatusChanged = { [weak self] phase in
+            Task { @MainActor in
+                self?.updateIcon(phase: phase)
+            }
+        }
+    }
+
+    func updateIcon(phase: String) {
+        guard let button = statusItem?.button else { return }
+        button.image = makeMenuBarIcon(phase: phase)
     }
 
     @objc func togglePopover(_ sender: AnyObject?) {
