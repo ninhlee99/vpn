@@ -377,6 +377,7 @@ struct CustomMenuButton: View {
     }
 }
 
+@MainActor
 final class MenuHelper: NSObject {
     let onEdit: () -> Void
     let onDelete: () -> Void
@@ -899,6 +900,7 @@ struct SecondaryButtonStyle: ButtonStyle {
 
 // MARK: - App Delegate & Menu Bar Setup
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem?
@@ -930,7 +932,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.image = makeMenuBarIcon(phase: phase)
     }
 
-    @objc func togglePopover(_ sender: AnyObject?) {
+    @objc @MainActor func togglePopover(_ sender: AnyObject?) {
         guard let button = statusItem?.button else { return }
         if popover.isShown {
             popover.performClose(sender)
