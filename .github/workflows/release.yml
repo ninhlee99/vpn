@@ -1,9 +1,9 @@
 name: release
 
 # Builds vpn-darwin-arm64 and vpn-darwin-amd64 on every push to main and
-# publishes them as assets on a rolling "latest" GitHub Release, which is
-# exactly what install.sh and `vpn update` download from
-# (releases/latest/download/vpn-darwin-<arch>). No macOS runner or cgo
+# publishes them as assets on a new immutable GitHub Release per commit.
+# install.sh and `vpn update` use releases/latest/download, so they still
+# resolve newest published release without a mutable `latest` tag. No macOS runner or cgo
 # needed — this project is pure Go, so cross-compiling both darwin/arm64
 # and darwin/amd64 from a Linux runner works fine.
 on:
@@ -13,6 +13,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -30,19 +34,30 @@ jobs:
         run: |
           VERSION="$(git describe --tags --always --dirty)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          # A rerun needs a fresh tag too: published immutable releases cannot
+          # accept replacement assets.
+          echo "RELEASE_TAG=build-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
           for arch in arm64 amd64; do
             CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X main.version=$VERSION" \
               -o "vpn-darwin-$arch" ./cmd/vpn
           done
 
-      - name: Publish release
+      # Immutable releases only accept assets while draft. A unique tag also
+      # prevents this action from replacing files on an existing release.
+      - name: Create draft release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: latest (${{ env.VERSION }})
-          make_latest: true
+          tag_name: ${{ env.RELEASE_TAG }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ env.VERSION }}
+          draft: true
           body: Automatically built from ${{ github.sha }}.
           files: |
             vpn-darwin-arm64
             vpn-darwin-amd64
+
+      - name: Publish release as latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
