@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"sort"
+	"strings"
 
 	"vpn/internal/config"
 	"vpn/internal/diagnostics"
@@ -88,23 +90,58 @@ Usage:
   vpn status [--json]
   vpn repair
   vpn logs [-f]
-  vpn update                        rebuild + reinstall the latest version (only from an install.sh-built binary)
+  vpn update                        download and install latest release binary
   vpn uninstall [-y]                remove vpn entirely: binary, log, state, all profiles/accounts (Keychain included)
   vpn version
 `)
 }
 
+// newFlagSet keeps malformed user input inside Run's normal error path.
+// flag.ExitOnError would terminate the process from deep inside a subcommand,
+// skipping the CLI's consistent `Error: ...` handling and making commands hard
+// to call from another Go process.
+func newFlagSet(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	return fs
+}
+
+// flagsFirst accepts both conventional flag-first syntax and the natural
+// command examples shown in help: `profile add work --server vpn.example`.
+// Go's flag package stops parsing at the first positional argument, so these
+// two commands need a small normalization layer before fs.Parse.
+func flagsFirst(args []string, valueFlags map[string]bool) []string {
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			positionals = append(positionals, arg)
+			continue
+		}
+		flags = append(flags, arg)
+		name := strings.SplitN(arg, "=", 2)[0]
+		if valueFlags[name] && !strings.Contains(arg, "=") && i+1 < len(args) {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return append(flags, positionals...)
+}
+
 // --- init ---
 
 func cmdInit(args []string) error {
-	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	fs := newFlagSet("init")
 	profileName := fs.String("profile", "", `profile name to create (prompted if omitted, default: "default")`)
 	server := fs.String("server", "", "VPN server host or IP")
 	serverID := fs.String("server-id", "", "expected IKE remote ID (optional, default: accept any)")
 	username := fs.String("username", "", "VPN account username")
 	psk := fs.String("psk", "", "IPsec pre-shared key (prompted if omitted)")
 	password := fs.String("password", "", "VPN account password (prompted if omitted)")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -188,14 +225,16 @@ func cmdProfile(args []string) error {
 }
 
 func cmdProfileAdd(args []string) error {
-	fs := flag.NewFlagSet("profile add", flag.ExitOnError)
+	fs := newFlagSet("profile add")
 	server := fs.String("server", "", "VPN server host or IP (required)")
 	serverID := fs.String("server-id", "", "expected IKE remote ID")
 	mtu := fs.Int("mtu", 1400, "tunnel MTU override")
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
 	psk := fs.String("psk", "", "IPsec pre-shared key (prompted if omitted)")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
+	if err := fs.Parse(flagsFirst(args, map[string]bool{"--server": true, "--server-id": true, "--mtu": true, "--psk": true})); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
 		return fmt.Errorf("usage: vpn profile add <name> --server <host>")
 	}
 	name := fs.Arg(0)
@@ -369,10 +408,12 @@ func cmdAccount(args []string) error {
 }
 
 func cmdAccountAdd(args []string) error {
-	fs := flag.NewFlagSet("account add", flag.ExitOnError)
+	fs := newFlagSet("account add")
 	makeDefault := fs.Bool("default", false, "make this the profile's default account")
 	password := fs.String("password", "", "account password (prompted if omitted)")
-	fs.Parse(args)
+	if err := fs.Parse(flagsFirst(args, map[string]bool{"--password": true})); err != nil {
+		return err
+	}
 	if fs.NArg() != 2 {
 		return fmt.Errorf("usage: vpn account add <profile> <username> [--default]")
 	}
@@ -463,12 +504,14 @@ func cmdAccountUse(args []string) error {
 // --- diagnose ---
 
 func cmdDiagnose(args []string) error {
-	fs := flag.NewFlagSet("diagnose", flag.ExitOnError)
+	fs := newFlagSet("diagnose")
 	profileName := fs.String("profile", "", "profile to diagnose (default: active profile)")
 	server := fs.String("server", "", "diagnose an arbitrary host instead of a saved profile")
 	asJSON := fs.Bool("json", false, "output as JSON")
 	timeout := fs.Duration("timeout", 20_000_000_000, "overall diagnostic timeout") // 20s
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	target := *server
 	if target == "" {

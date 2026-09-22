@@ -45,10 +45,16 @@ const OwnerFile = "/etc/vpn-owner-uid"
 // executable (and, without this check, root-capable) for *every* local
 // account on the machine, not just the person who ran install.sh — call
 // this as the very first thing in main(), before Drop or any subcommand
-// dispatch, so a different user can't invoke this binary at all,
-// privileged or not. It must run while still at euid 0 (i.e. before Drop)
-// since OwnerFile is 0600 root-owned.
+// dispatch, so a different user can't invoke this binary at all. Enforce it
+// only when this executable is actually setuid-root (euid 0, real uid
+// non-root). A downloaded candidate binary is deliberately run as an
+// ordinary user for `vpn version` before installation; it cannot read the
+// root-only OwnerFile and has no privilege to protect, so rejecting it would
+// break installer/update validation on a machine with vpn already installed.
 func CheckOwner() error {
+	if os.Geteuid() != 0 || realUID == 0 {
+		return nil
+	}
 	data, err := os.ReadFile(OwnerFile)
 	if os.IsNotExist(err) {
 		return nil
@@ -57,7 +63,10 @@ func CheckOwner() error {
 		return fmt.Errorf("read %s: %w", OwnerFile, err)
 	}
 	want, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
+	if err != nil || want < 0 {
+		if err == nil {
+			err = fmt.Errorf("UID must not be negative")
+		}
 		return fmt.Errorf("invalid contents of %s: %w", OwnerFile, err)
 	}
 	if realUID != want {

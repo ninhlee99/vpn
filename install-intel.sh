@@ -5,7 +5,8 @@
 set -euo pipefail
 
 URL="https://github.com/ninhlee99/vpn/releases/latest/download/vpn-darwin-amd64"
-BIN=/tmp/vpn-download
+BIN="$(mktemp -t vpn-download)"
+trap 'rm -f "$BIN"' EXIT
 
 echo "Downloading $URL..."
 curl -fsSL -o "$BIN" "$URL"
@@ -14,6 +15,7 @@ chmod +x "$BIN"
 
 OWNER_UID="$(id -u)"
 sudo mv "$BIN" /usr/local/bin/vpn
+trap - EXIT
 sudo chown root:wheel /usr/local/bin/vpn
 sudo chmod 4755 /usr/local/bin/vpn
 

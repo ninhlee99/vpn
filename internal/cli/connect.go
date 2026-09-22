@@ -2,7 +2,6 @@ package cli
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,7 +27,7 @@ const pathTail = "/usr/bin/tail"
 const daemonChildEnv = "VPN_DAEMON_CHILD"
 
 func cmdConnect(args []string) error {
-	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	fs := newFlagSet("connect")
 	profileName := fs.String("profile", "", "profile to connect (default: active profile)")
 	accountName := fs.String("account", "", "account to use (default: profile's default account)")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall connect timeout")
@@ -38,7 +37,9 @@ func cmdConnect(args []string) error {
 	// `vpn connect -d` don't break.
 	fs.Bool("d", true, "run in background (default; kept for compatibility)")
 	fs.Bool("daemon", true, "alias of -d")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if os.Getenv(daemonChildEnv) == "1" {
 		return doConnect(*profileName, *accountName, *timeout, *verbose)
@@ -139,9 +140,11 @@ func cmdDisconnect(args []string) error {
 }
 
 func cmdStatus(args []string) error {
-	fs := flag.NewFlagSet("status", flag.ExitOnError)
+	fs := newFlagSet("status")
 	asJSON := fs.Bool("json", false, "output as JSON")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	s, err := state.Load()
 	if err != nil {
@@ -176,9 +179,11 @@ func cmdRepair(args []string) error {
 }
 
 func cmdLogs(args []string) error {
-	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	fs := newFlagSet("logs")
 	follow := fs.Bool("f", false, "follow the log file")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	logPath := engine.LogPath()
 	if _, err := os.Stat(logPath); err != nil {

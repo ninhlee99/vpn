@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"flag"
 	"fmt"
 	"os"
 
@@ -14,9 +13,11 @@ import (
 )
 
 func cmdUninstall(args []string) error {
-	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	fs := newFlagSet("uninstall")
 	yes := fs.Bool("y", false, "don't ask for confirmation")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	if !*yes {
 		fmt.Println("This will remove: /usr/local/bin/vpn, the log, state, and every saved profile/account (including PSK/passwords in Keychain).")

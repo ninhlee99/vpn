@@ -31,7 +31,7 @@ jobs:
           VERSION="$(git describe --tags --always --dirty)"
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           for arch in arm64 amd64; do
-            GOOS=darwin GOARCH=$arch go build -trimpath \
+            CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath \
               -ldflags "-s -w -X main.version=$VERSION" \
               -o "vpn-darwin-$arch" ./cmd/vpn
           done

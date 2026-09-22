@@ -7,7 +7,7 @@ VPN client L2TP/IPsec thuần macOS.
 Tải thẳng binary build sẵn từ GitHub Release rồi copy vào `/usr/local/bin` — không tải source code, không cần Go trên máy đích:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/install.sh | bash
 ```
 
 Tự nhận diện kiến trúc máy (Apple Silicon hay Intel). Muốn chỉ định thẳng thay vì tự nhận diện:
@@ -17,15 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/install-arm64.sh
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/install-intel.sh | bash   # Mac Intel
 ```
 
-Đang phát triển, đã có sẵn source code trong thư mục này thì dùng:
-
-```bash
-./install.sh
-```
-
-Cách này cũng thử tải binary sẵn trước, chỉ build từ source (cần Go) nếu không tải được.
-
-Cả 4 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần dưới), sau đó dùng không cần gõ `sudo` nữa.
+Cả 3 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần dưới), sau đó dùng không cần gõ `sudo` nữa.
 
 ## Setup lần đầu
 
@@ -47,8 +39,10 @@ vpn status        # xem đang connected hay chưa
 
 ### Vì sao không cần sudo
 
-`install.sh` cài `vpn` với setuid-root, đồng thời khoá cứng UID của người vừa
-chạy `install.sh` ngay trong binary. Binary tự hạ quyền về user thường ngay
+Khi cài, installer ghi UID của người vừa chạy vào file root-only
+`/etc/vpn-owner-uid`; binary đọc file này lúc chạy. Cách này cho phép cùng
+binary build sẵn từ CI dùng cho mọi máy, nhưng vẫn chỉ cho user đã cài chạy.
+Binary tự hạ quyền về user thường ngay
 khi khởi động, chỉ tạm nâng lại quyền root đúng lúc thật sự cần (mở utun, bind
 UDP/500, đổi route/DNS) rồi hạ ngay sau đó — không giữ quyền root suốt phiên
 kết nối. **Chỉ đúng user đã cài mới gọi được `vpn`** — user khác trên máy chạy
@@ -77,6 +71,6 @@ vpn logs -f    # xem log
 ## Cập nhật / gỡ cài đặt
 
 ```bash
-vpn update       # git pull + build lại + cài đè bản mới nhất (chỉ chạy được nếu cài qua install.sh)
+vpn update       # tải binary release đúng kiến trúc rồi cài đè
 vpn uninstall    # xoá sạch: binary, log, state, toàn bộ profile/account (kể cả PSK/password trong Keychain)
 ```

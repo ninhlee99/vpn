@@ -11,8 +11,7 @@ import (
 )
 
 var (
-	version   = "1.0.0" // override at build time via -ldflags "-X main.version=..."
-	sourceDir = ""      // set by install.sh via -ldflags "-X main.sourceDir=...": the repo `vpn update` rebuilds from, if it falls back to a source build.
+	version = "1.0.0" // override at build time via -ldflags "-X main.version=..."
 )
 
 func main() {
@@ -33,6 +32,5 @@ func main() {
 	privilege.Drop()
 
 	cli.Version = version
-	cli.SourceDir = sourceDir
 	os.Exit(cli.Run(os.Args[1:]))
 }
