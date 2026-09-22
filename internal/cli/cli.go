@@ -97,7 +97,7 @@ Usage:
 
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	profileName := fs.String("profile", "default", "profile name to create")
+	profileName := fs.String("profile", "", `profile name to create (prompted if omitted, default: "default")`)
 	server := fs.String("server", "", "VPN server host or IP")
 	serverID := fs.String("server-id", "", "expected IKE remote ID (optional, default: accept any)")
 	username := fs.String("username", "", "VPN account username")
@@ -110,6 +110,13 @@ func cmdInit(args []string) error {
 		return err
 	}
 
+	if *profileName == "" {
+		fmt.Print("VPN connection name [default]: ")
+		fmt.Scanln(profileName)
+		if *profileName == "" {
+			*profileName = "default"
+		}
+	}
 	if *server == "" {
 		fmt.Print("VPN server (host or IP): ")
 		fmt.Scanln(server)
