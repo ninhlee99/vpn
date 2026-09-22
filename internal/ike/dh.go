@@ -1,0 +1,123 @@
+package ike
+
+import (
+	"crypto/rand"
+	"fmt"
+	"math/big"
+)
+
+// DHGroup is a standardized MODP Diffie-Hellman group. Primes are the
+// public, standardized values from RFC 2409 §6 (groups 1/2) and RFC 3526
+// §2/§3 (group 5/14) — not invented, and identical to what strongSwan and
+// every other IKE implementation uses for these group numbers.
+type DHGroup struct {
+	ID        int
+	Prime     *big.Int
+	Generator *big.Int
+	BitLen    int
+}
+
+var (
+	group1Prime = mustHexPrime(`
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A63A3620 FFFFFFFF FFFFFFFF`)
+
+	group2Prime = mustHexPrime(`
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+		EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381
+		FFFFFFFF FFFFFFFF`)
+
+	group5Prime = mustHexPrime(`
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+		EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D
+		C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F
+		83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D
+		670C354E 4ABC9804 F1746C08 CA237327 FFFFFFFF FFFFFFFF`)
+
+	group14Prime = mustHexPrime(`
+		FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+		29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+		EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+		E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+		EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D
+		C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F
+		83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D
+		670C354E 4ABC9804 F1746C08 CA18217C 32905E46 2E36CE3B
+		E39E772C 180E8603 9B2783A2 EC07A28F B5C55DF0 6F4C52C9
+		DE2BCBF6 95581718 3995497C EA956AE5 15D22618 98FA0510
+		15728E5A 8AACAA68 FFFFFFFF FFFFFFFF`)
+)
+
+// Groups is keyed by MODP group number, matching the group numbers used in
+// entrypoint.sh's ike= lines (modp1024=2, modp2048=14).
+var Groups = map[int]*DHGroup{
+	1:  {ID: 1, Prime: group1Prime, Generator: big.NewInt(2), BitLen: 768},
+	2:  {ID: 2, Prime: group2Prime, Generator: big.NewInt(2), BitLen: 1024},
+	5:  {ID: 5, Prime: group5Prime, Generator: big.NewInt(2), BitLen: 1536},
+	14: {ID: 14, Prime: group14Prime, Generator: big.NewInt(2), BitLen: 2048},
+}
+
+func mustHexPrime(hexWithSpaces string) *big.Int {
+	clean := make([]byte, 0, len(hexWithSpaces))
+	for _, c := range []byte(hexWithSpaces) {
+		if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f') {
+			clean = append(clean, c)
+		}
+	}
+	n, ok := new(big.Int).SetString(string(clean), 16)
+	if !ok {
+		panic("invalid hardcoded DH prime hex")
+	}
+	return n
+}
+
+// KeyPair is one side's ephemeral Diffie-Hellman keying material.
+type KeyPair struct {
+	Group   *DHGroup
+	Private *big.Int
+	Public  *big.Int // g^private mod p, encoded big-endian, group.BitLen/8 bytes
+}
+
+// GenerateKeyPair produces a fresh ephemeral DH keypair in the given group.
+func GenerateKeyPair(group *DHGroup) (*KeyPair, error) {
+	// Private exponent: a random value in [2, p-2], sized to the group per
+	// common practice (256 bits of randomness is enough entropy for every
+	// group here; RFC 2409 does not mandate an exact size).
+	priv, err := rand.Int(rand.Reader, new(big.Int).Sub(group.Prime, big.NewInt(3)))
+	if err != nil {
+		return nil, fmt.Errorf("generate DH private value: %w", err)
+	}
+	priv.Add(priv, big.NewInt(2))
+	pub := new(big.Int).Exp(group.Generator, priv, group.Prime)
+	return &KeyPair{Group: group, Private: priv, Public: pub}, nil
+}
+
+// PublicBytes encodes the public value as a fixed-width big-endian byte
+// string the size of the group's prime, as IKE KE payloads require.
+func (k *KeyPair) PublicBytes() []byte {
+	return leftPad(k.Public.Bytes(), k.Group.BitLen/8)
+}
+
+// SharedSecret computes g^(a*b) mod p from the peer's public KE value.
+func (k *KeyPair) SharedSecret(peerPublic []byte) []byte {
+	peer := new(big.Int).SetBytes(peerPublic)
+	shared := new(big.Int).Exp(peer, k.Private, k.Group.Prime)
+	return leftPad(shared.Bytes(), k.Group.BitLen/8)
+}
+
+func leftPad(b []byte, size int) []byte {
+	if len(b) >= size {
+		return b[len(b)-size:]
+	}
+	out := make([]byte, size)
+	copy(out[size-len(b):], b)
+	return out
+}
