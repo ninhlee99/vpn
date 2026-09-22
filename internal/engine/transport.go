@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"syscall"
 
 	"vpn/internal/ike"
 	"vpn/internal/ipsec"
@@ -19,9 +21,10 @@ import (
 // header plus the L2TP message) since this client never builds real IP
 // packets for its own control/data traffic, only the payload IPsec expects.
 type espTransport struct {
-	sess *ike.Session
-	out  *ipsec.SA
-	in   *ipsec.SA
+	sess        *ike.Session
+	out         *ipsec.SA
+	in          *ipsec.SA
+	repairRoute func() error
 }
 
 const (
@@ -43,7 +46,21 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	if err != nil {
 		return fmt.Errorf("ESP encrypt: %w", err)
 	}
-	return t.sess.SendESP(pkt)
+	return sendWithRouteRetry(func() error { return t.sess.SendESP(pkt) }, t.repairRoute)
+}
+
+// sendWithRouteRetry repairs a route lost by macOS's route reconciler and
+// retries once. EHOSTUNREACH/ENETUNREACH means the kernel did not transmit
+// the datagram, so the retry cannot duplicate an ESP packet.
+func sendWithRouteRetry(send func() error, repairRoute func() error) error {
+	err := send()
+	if err == nil || repairRoute == nil || (!errors.Is(err, syscall.EHOSTUNREACH) && !errors.Is(err, syscall.ENETUNREACH)) {
+		return err
+	}
+	if repairErr := repairRoute(); repairErr != nil {
+		return fmt.Errorf("repair VPN server route after %w: %v", err, repairErr)
+	}
+	return send()
 }
 
 func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {
