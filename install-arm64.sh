@@ -948,7 +948,7 @@ SWIFT_EOF
 
 if command -v swiftc &>/dev/null; then
     echo "  -> Compiling native Swift UI ($ARCH)..."
-    swiftc -O -target "$SWIFT_TARGET" -framework Cocoa -framework SwiftUI "$SWIFT_SRC" -o "$UI_BIN"
+    swiftc -O -parse-as-library -target "$SWIFT_TARGET" -framework Cocoa -framework SwiftUI "$SWIFT_SRC" -o "$UI_BIN"
 
     pkill -f "TMS-VPN" 2>/dev/null || true
     pkill -f "tms-vpn-bar" 2>/dev/null || true
