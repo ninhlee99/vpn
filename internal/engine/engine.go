@@ -62,9 +62,6 @@ type Config struct {
 // process to keep holding root through what's normally the vast majority
 // of a session's lifetime.
 func Connect(cfg Config) error {
-	if err := vpnlog.Init(cfg.Verbose); err != nil {
-		return fmt.Errorf("open log file: %w", err)
-	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
@@ -79,6 +76,14 @@ func Connect(cfg Config) error {
 	var ipcp ppp.NegotiatedIPCP
 
 	setupErr := privilege.Elevate(func() error {
+		// vpnlog.Init has to run here, not before Elevate: /var/log/vpn-l2tp.log
+		// is root-owned (see internal/vpnlog), and this is the one point in
+		// Connect that's actually privileged. Once open, the fd stays valid
+		// for every later vpnlog call in this process regardless of euid —
+		// Unix only checks permissions at open(2), not on each write.
+		if err := vpnlog.Init(cfg.Verbose); err != nil {
+			return fmt.Errorf("open log file: %w", err)
+		}
 		_ = st.Save()
 
 		fail := func(stage, detail string, err error) error {
