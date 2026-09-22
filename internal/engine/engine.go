@@ -243,6 +243,12 @@ func Connect(cfg Config) error {
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// macOS can silently reap the routes ProtectServer/ApplyFullTunnel just
+	// installed at any point during a long-lived session (see routing.go's
+	// Watch doc comment) — re-assert them periodically instead of trusting
+	// they stay in place for the whole connection.
+	go rtSnapshot.Watch(runCtx, privilege.Elevate, 10*time.Second)
+
 	pumpErr := runDataPlane(runCtx, dev, pppT)
 
 	// Tear down on the way out no matter why the pump stopped (signal or

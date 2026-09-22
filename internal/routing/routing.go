@@ -6,9 +6,11 @@
 package routing
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Absolute paths, not just "route"/"ifconfig" — routing.go's callers run
@@ -105,9 +107,15 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 // the standard 0.0.0.0/1 + 128.0.0.0/1 split-default trick: two more-specific
 // routes outrank the existing default without deleting it, so Restore can
 // cleanly remove just the two overrides.
+// Idempotent (delete-then-add, like ProtectServer): callers may re-invoke
+// this periodically for the life of the connection — macOS's own network
+// reconciliation (IPMonitor) can silently reap these routes even with
+// -static, so simply adding them once at connect time isn't reliable for a
+// long-lived session (see Watch).
 func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	s.tunIface = tunIface
 	for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		_ = exec.Command(routeBin, "-n", "delete", "-net", net).Run()
 		cmd := exec.Command(routeBin, "-n", "add", "-static", "-net", net, "-interface", tunIface)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add override route %s via %s: %w (%s)", net, tunIface, err, strings.TrimSpace(string(out)))
@@ -115,6 +123,40 @@ func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	}
 	s.overrideAdded = true
 	return nil
+}
+
+// Watch periodically re-asserts ProtectServer (and ApplyFullTunnel, if it
+// was ever applied) for as long as ctx is alive — a single route add at
+// connect time isn't enough for a long session: macOS can reap these
+// routes out from under a live connection (see ApplyFullTunnel's doc
+// comment), and when the host route to the VPN server specifically goes
+// missing, the IKE/ESP socket's next send fails immediately and fatally
+// (`sendto: can't assign requested address`) since it falls through to
+// whatever less-specific route is left — which, under full-tunnel, points
+// right back into the tunnel interface that route was supposed to bypass.
+// elevate is called around each reassertion since these need root.
+func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, interval time.Duration) {
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_ = elevate(func() error {
+				if s.hostRouteAdded && s.VPNServerIP != "" {
+					_ = s.ProtectServer(s.VPNServerIP)
+				}
+				if s.overrideAdded && s.tunIface != "" {
+					_ = s.ApplyFullTunnel(s.tunIface)
+				}
+				return nil
+			})
+		}
+	}
 }
 
 // Restore undoes everything Apply*/Protect* did, in reverse order. It is
