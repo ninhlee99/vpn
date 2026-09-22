@@ -4,21 +4,28 @@ VPN client L2TP/IPsec thuần macOS.
 
 ## Cài đặt
 
-Máy chưa có sẵn source code — cài thẳng bằng 1 lệnh:
+Tải thẳng binary build sẵn từ GitHub Release rồi copy vào `/usr/local/bin` — không tải source code, không cần Go trên máy đích:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/bootstrap.sh | bash
 ```
 
-Lệnh này tự `git clone` source vào `~/.local/share/vpn-src` rồi chạy `install.sh` ở đó.
+Tự nhận diện kiến trúc máy (Apple Silicon hay Intel). Muốn chỉ định thẳng thay vì tự nhận diện:
 
-Hoặc nếu đã có sẵn source code trong thư mục này:
+```bash
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/install-arm64.sh | bash   # Apple Silicon (M1/M2/M3...)
+curl -fsSL https://raw.githubusercontent.com/ninhlee99/vpn/main/install-intel.sh | bash   # Mac Intel
+```
+
+Đang phát triển, đã có sẵn source code trong thư mục này thì dùng:
 
 ```bash
 ./install.sh
 ```
 
-Cả 2 cách: script tự kiểm tra Go, chưa có thì cài Go (qua Homebrew, cài luôn Homebrew nếu máy chưa có), xong tự build và cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần dưới), sau đó dùng không cần gõ `sudo` nữa.
+Cách này cũng thử tải binary sẵn trước, chỉ build từ source (cần Go) nếu không tải được.
+
+Cả 4 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần dưới), sau đó dùng không cần gõ `sudo` nữa.
 
 ## Setup lần đầu
 

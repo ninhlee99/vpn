@@ -12,15 +12,16 @@ import (
 
 var (
 	version   = "1.0.0" // override at build time via -ldflags "-X main.version=..."
-	sourceDir = ""      // set by install.sh via -ldflags "-X main.sourceDir=...": the repo `vpn update` rebuilds from.
-	allowedUID = ""     // set by install.sh via -ldflags "-X main.allowedUID=$(id -u)": only this user may run this binary at all.
+	sourceDir = ""      // set by install.sh via -ldflags "-X main.sourceDir=...": the repo `vpn update` rebuilds from, if it falls back to a source build.
 )
 
 func main() {
 	// Absolute first thing: reject any other local user before this
 	// setuid-root binary does anything else, privileged or not — see
-	// privilege.CheckOwner's doc comment for why.
-	if err := privilege.CheckOwner(allowedUID); err != nil {
+	// privilege.CheckOwner's doc comment for why. Reads privilege.OwnerFile
+	// at runtime, not a build-time constant, so this same binary works
+	// whether it was compiled locally or downloaded as a prebuilt release.
+	if err := privilege.CheckOwner(); err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
@@ -33,6 +34,5 @@ func main() {
 
 	cli.Version = version
 	cli.SourceDir = sourceDir
-	cli.AllowedUID = allowedUID
 	os.Exit(cli.Run(os.Args[1:]))
 }

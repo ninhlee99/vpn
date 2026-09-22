@@ -66,6 +66,9 @@ func cmdUninstall(args []string) error {
 		if err := os.Remove(engine.LogPath()); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", engine.LogPath(), err)
 		}
+		if err := os.Remove(privilege.OwnerFile); err != nil && !os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", privilege.OwnerFile, err)
+		}
 		// Delete the binary itself last — safe on Unix even though it's
 		// the file this running process's own image was exec'd from
 		// (removing a directory entry doesn't touch an already-open/

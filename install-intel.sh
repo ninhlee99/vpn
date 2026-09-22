@@ -1,16 +1,10 @@
 #!/usr/bin/env bash
-# One-liner install: detects this Mac's architecture and downloads the
-# matching prebuilt binary straight from the latest GitHub Release, then
-# installs it. No source code, no git clone, no Go toolchain needed.
+# Installs `vpn` for Intel Macs (amd64) by downloading the prebuilt binary
+# directly — no Go, no source checkout needed. Standalone: safe to curl
+# and run without cloning the repo first.
 set -euo pipefail
 
-case "$(uname -m)" in
-  arm64) ARCH=arm64 ;;
-  x86_64) ARCH=amd64 ;;
-  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-URL="https://github.com/ninhlee99/vpn/releases/latest/download/vpn-darwin-$ARCH"
+URL="https://github.com/ninhlee99/vpn/releases/latest/download/vpn-darwin-amd64"
 BIN=/tmp/vpn-download
 
 echo "Downloading $URL..."

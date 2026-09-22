@@ -1,0 +1,48 @@
+name: release
+
+# Builds vpn-darwin-arm64 and vpn-darwin-amd64 on every push to main and
+# publishes them as assets on a rolling "latest" GitHub Release, which is
+# exactly what install.sh and `vpn update` download from
+# (releases/latest/download/vpn-darwin-<arch>). No macOS runner or cgo
+# needed — this project is pure Go, so cross-compiling both darwin/arm64
+# and darwin/amd64 from a Linux runner works fine.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # so `git describe` sees tags/history for the version string
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+
+      - name: Build
+        run: |
+          VERSION="$(git describe --tags --always --dirty)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          for arch in arm64 amd64; do
+            GOOS=darwin GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$VERSION" \
+              -o "vpn-darwin-$arch" ./cmd/vpn
+          done
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: latest (${{ env.VERSION }})
+          make_latest: true
+          body: Automatically built from ${{ github.sha }}.
+          files: |
+            vpn-darwin-arm64
+            vpn-darwin-amd64

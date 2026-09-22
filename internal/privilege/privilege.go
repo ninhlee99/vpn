@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -28,22 +29,36 @@ import (
 // before Drop ever runs — this is what Elevate restores to afterward.
 var realUID = os.Getuid()
 
-// CheckOwner enforces that only the user who installed this binary can run
-// it at all. allowedUID is baked in at build time by install.sh (via
-// -ldflags "-X main.allowedUID=$(id -u)") — empty means "not installed via
-// install.sh" (a plain dev build), which skips the check entirely. This
-// exists because installing setuid-root makes the binary executable (and,
-// without this check, root-capable) for *every* local account on the
-// machine, not just the person who ran install.sh — call this as the very
-// first thing in main(), before Drop or any subcommand dispatch, so a
-// different user can't invoke this binary at all, privileged or not.
-func CheckOwner(allowedUID string) error {
-	if allowedUID == "" {
+// OwnerFile holds the uid of whoever ran install.sh, root-owned 0600 —
+// CheckOwner reads it (not a baked-in build-time constant) so the exact
+// same binary can be shared/downloaded across machines and users: a
+// prebuilt release binary can't have any one person's uid compiled into
+// it, since the CI building it doesn't know who'll install it. install.sh
+// writes this file as the very last step of installing; vpn uninstall
+// removes it.
+const OwnerFile = "/etc/vpn-owner-uid"
+
+// CheckOwner enforces that only the user who installed this binary (i.e.
+// ran install.sh) can run it at all — missing OwnerFile means "not
+// installed via install.sh" (a plain dev build), which skips the check
+// entirely. This exists because installing setuid-root makes the binary
+// executable (and, without this check, root-capable) for *every* local
+// account on the machine, not just the person who ran install.sh — call
+// this as the very first thing in main(), before Drop or any subcommand
+// dispatch, so a different user can't invoke this binary at all,
+// privileged or not. It must run while still at euid 0 (i.e. before Drop)
+// since OwnerFile is 0600 root-owned.
+func CheckOwner() error {
+	data, err := os.ReadFile(OwnerFile)
+	if os.IsNotExist(err) {
 		return nil
 	}
-	want, err := strconv.Atoi(allowedUID)
 	if err != nil {
-		return fmt.Errorf("internal error: invalid baked-in owner uid %q", allowedUID)
+		return fmt.Errorf("read %s: %w", OwnerFile, err)
+	}
+	want, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return fmt.Errorf("invalid contents of %s: %w", OwnerFile, err)
 	}
 	if realUID != want {
 		return fmt.Errorf("this vpn binary was installed by a different user (uid %d) — only that user can run it; ask them to run it, or reinstall it yourself with ./install.sh", want)
