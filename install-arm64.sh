@@ -507,7 +507,7 @@ final class VPNManager: ObservableObject {
     }
 }
 
-// MARK: - MacOSMenuBar Swift Component (Status Bar Icon Border Animation)
+// MARK: - MacOSMenuBar Swift Component (Live SwiftUI View in macOS Status Bar)
 
 struct MacOSMenuBar: View {
     @ObservedObject var vpn = VPNManager.shared
@@ -515,7 +515,7 @@ struct MacOSMenuBar: View {
     @State private var isPulsing: Bool = false
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 0) {
             ZStack {
                 if vpn.isConnecting {
                     RoundedRectangle(cornerRadius: 6)
@@ -532,33 +532,38 @@ struct MacOSMenuBar: View {
                                 startAngle: .degrees(rotation),
                                 endAngle: .degrees(rotation + 360)
                             ),
-                            lineWidth: 1.5
+                            lineWidth: 1.8
                         )
-                        .shadow(color: Color.orange.opacity(0.7), radius: 4)
+                        .shadow(color: Color.orange.opacity(0.8), radius: 5)
                         .onAppear {
+                            rotation = 0
                             withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
                                 rotation = 360
                             }
                         }
                 } else if vpn.isConnected {
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.2)
+                        .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.5)
                         .shadow(
-                            color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.8 : 0.25),
-                            radius: isPulsing ? 5 : 2
+                            color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.9 : 0.2),
+                            radius: isPulsing ? 6 : 2
                         )
                         .onAppear {
+                            isPulsing = false
                             withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
                                 isPulsing = true
                             }
                         }
+                } else {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
                 }
 
                 Image(systemName: vpn.isConnected ? "checkmark.shield.fill" : (vpn.isConnecting ? "shield.lefthalf.filled" : "shield"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(
-                        vpn.isConnected ? Color(red: 0.2, green: 0.9, blue: 0.6) :
-                        (vpn.isConnecting ? Color.orange : Color.white.opacity(0.9))
+                        vpn.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.6) :
+                        (vpn.isConnecting ? Color.orange : Color.white.opacity(0.85))
                     )
 
                 if vpn.isConnected {
@@ -575,6 +580,7 @@ struct MacOSMenuBar: View {
             }
             .frame(width: 22, height: 22)
         }
+        .frame(width: 28, height: 22)
         .contentShape(Rectangle())
         .onTapGesture {
             AppDelegate.shared?.togglePopover(nil)
@@ -607,6 +613,7 @@ struct ConnectingLinearBorder: View {
             )
             .shadow(color: Color.orange.opacity(0.6), radius: 8)
             .onAppear {
+                rotation = 0
                 withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
                     rotation = 360
                 }
@@ -624,10 +631,11 @@ struct ConnectedPulseBorder: View {
         RoundedRectangle(cornerRadius: cornerRadius)
             .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.8)
             .shadow(
-                color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.75 : 0.25),
+                color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.8 : 0.25),
                 radius: isPulsing ? 10 : 4
             )
             .onAppear {
+                isPulsing = false
                 withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
                     isPulsing = true
                 }
@@ -1324,36 +1332,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem?
     var popover = NSPopover()
+    var hostingView: NSHostingView<MacOSMenuBar>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: 28)
         
-        let initialPhase = MainActor.assumeIsolated {
-            VPNManager.shared.currentPhase
+        // Host the live SwiftUI MacOSMenuBar component (with 2.0s linear rotation & pulse)
+        let menuBarView = MacOSMenuBar()
+        let hosting = NSHostingView(rootView: menuBarView)
+        hosting.frame = NSRect(x: 0, y: 0, width: 28, height: 22)
+        
+        if let button = statusItem?.button {
+            button.addSubview(hosting)
+            hosting.autoresizingMask = [.width, .height]
+            button.action = #selector(togglePopover(_:))
+            button.target = self
         }
-        updateIcon(phase: initialPhase)
-
-        guard let button = statusItem?.button else { return }
-        button.action = #selector(togglePopover(_:))
-        button.target = self
+        self.hostingView = hosting
 
         popover.contentSize = NSSize(width: 370, height: 440)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
-
-        MainActor.assumeIsolated {
-            VPNManager.shared.onStatusChanged = { [weak self] phase in
-                Task { @MainActor in
-                    self?.updateIcon(phase: phase)
-                }
-            }
-        }
-    }
-
-    func updateIcon(phase: String) {
-        guard let button = statusItem?.button else { return }
-        button.image = makeMenuBarIcon(phase: phase)
     }
 
     @objc func togglePopover(_ sender: AnyObject?) {
