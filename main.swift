@@ -142,6 +142,8 @@ final class VPNManager: ObservableObject {
         URL(fileURLWithPath: "/var/run/vpn/state.json")
     }
 
+    private let operationQueue = DispatchQueue(label: "com.tms.vpn.operationQueue", qos: .userInitiated)
+
     init() {
         syncFromDisk()
         startPolling()
@@ -308,41 +310,50 @@ final class VPNManager: ObservableObject {
 
     func connect(profileName: String) {
         cancelAutoRetry()
+        
+        // 0ms INSTANT OPTIMISTIC UI FEEDBACK
         self.isConnecting = true
+        self.isConnected = false
         self.currentPhase = "CONNECTING"
         self.activeProfileName = profileName
         self.errorMessage = nil
+        self.activeAlert = nil
         self.isStaleSession = false
+        self.profiles = self.profiles.map { p in
+            var copy = p
+            if p.name == profileName {
+                copy.isConnecting = true
+                copy.isConnected = false
+            } else {
+                copy.isConnecting = false
+                copy.isConnected = false
+            }
+            return copy
+        }
         self.onStatusChanged?("CONNECTING")
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Serialized execution to prevent race condition when rapidly toggling off/on
+        operationQueue.async { [weak self] in
             let cli = "/usr/local/bin/vpn"
 
-            // 1. Explicit Graceful Disconnect / Logout via CLI
+            // 1. Graceful disconnect of any existing session
             let pDisc = Process()
             pDisc.executableURL = URL(fileURLWithPath: cli)
             pDisc.arguments = ["disconnect"]
             try? pDisc.run()
             pDisc.waitUntilExit()
 
-            // 2. Kill any remaining stale background L2TP/PPP processes
+            // 2. Kill any hung CLI process safely
             let pKill = Process()
-            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-            pKill.arguments = ["-9", "vpn"]
+            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pKill.arguments = ["-9", "-f", "vpn connect"]
             try? pKill.run()
             pKill.waitUntilExit()
 
-            // 3. Repair routing and DNS state
-            let pRep = Process()
-            pRep.executableURL = URL(fileURLWithPath: cli)
-            pRep.arguments = ["repair"]
-            try? pRep.run()
-            pRep.waitUntilExit()
+            // 3. Short cooldown (0.3s) for interface & PID release
+            Thread.sleep(forTimeInterval: 0.3)
 
-            // 4. Brief pause to allow peer server to flush session
-            Thread.sleep(forTimeInterval: 0.6)
-
-            // 5. Launch new connection
+            // 4. Launch new connection
             let task = Process()
             task.executableURL = URL(fileURLWithPath: cli)
             task.arguments = ["connect", "--profile", profileName]
@@ -357,12 +368,24 @@ final class VPNManager: ObservableObject {
     func cleanupAndForceConnect(profileName: String) {
         cancelAutoRetry()
         self.isConnecting = true
+        self.isConnected = false
         self.currentPhase = "CONNECTING"
         self.activeProfileName = profileName
         self.errorMessage = "Đang đăng xuất phiên cũ & kết nối lại..."
+        self.profiles = self.profiles.map { p in
+            var copy = p
+            if p.name == profileName {
+                copy.isConnecting = true
+                copy.isConnected = false
+            } else {
+                copy.isConnecting = false
+                copy.isConnected = false
+            }
+            return copy
+        }
         self.onStatusChanged?("CONNECTING")
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        operationQueue.async { [weak self] in
             let cli = "/usr/local/bin/vpn"
 
             // 1. Explicit CLI Disconnect / Logout
@@ -372,10 +395,10 @@ final class VPNManager: ObservableObject {
             try? pDisc.run()
             pDisc.waitUntilExit()
 
-            // 2. Force kill all stale processes
+            // 2. Terminate background processes
             let pKill = Process()
-            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-            pKill.arguments = ["-9", "vpn"]
+            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pKill.arguments = ["-9", "-f", "vpn connect"]
             try? pKill.run()
             pKill.waitUntilExit()
 
@@ -386,8 +409,8 @@ final class VPNManager: ObservableObject {
             try? pRep.run()
             pRep.waitUntilExit()
 
-            // 4. Give server 1.5s to flush RADIUS session
-            Thread.sleep(forTimeInterval: 1.5)
+            // 4. Give server 1.2s to flush RADIUS/L2TP session
+            Thread.sleep(forTimeInterval: 1.2)
 
             // 5. Connect again
             let task = Process()
@@ -403,18 +426,37 @@ final class VPNManager: ObservableObject {
 
     func disconnect() {
         cancelAutoRetry()
+        
+        // 0ms INSTANT OPTIMISTIC UI RESET
         self.isConnecting = false
         self.isConnected = false
         self.isStaleSession = false
         self.errorMessage = nil
         self.currentPhase = "DISCONNECTED"
+        self.profiles = self.profiles.map { p in
+            var copy = p
+            copy.isConnected = false
+            copy.isConnecting = false
+            return copy
+        }
         self.onStatusChanged?("DISCONNECTED")
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        operationQueue.async { [weak self] in
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
             task.arguments = ["disconnect"]
             try? task.run()
+            task.waitUntilExit()
+
+            let pKill = Process()
+            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pKill.arguments = ["-9", "-f", "vpn connect"]
+            try? pKill.run()
+            pKill.waitUntilExit()
+
+            Task { @MainActor in
+                self?.syncFromDisk()
+            }
         }
     }
 
@@ -475,7 +517,7 @@ final class VPNManager: ObservableObject {
 
 struct MacOSMenuBar: View {
     @ObservedObject var vpn = VPNManager.shared
-    @State private var rotation: Double = 0
+    @State private var isRotating: Bool = false
     @State private var isPulsing: Bool = false
 
     var body: some View {
@@ -483,40 +525,50 @@ struct MacOSMenuBar: View {
             ZStack {
                 if vpn.isConnecting {
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(
+                        .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                        .overlay(
                             AngularGradient(
                                 gradient: Gradient(colors: [
                                     Color.clear,
                                     Color.clear,
-                                    Color.orange.opacity(0.15),
+                                    Color.orange.opacity(0.3),
                                     Color.orange,
-                                    Color(red: 1.0, green: 0.9, blue: 0.6)
+                                    Color(red: 1.0, green: 0.95, blue: 0.7),
+                                    Color.clear
                                 ]),
-                                center: .center,
-                                startAngle: .degrees(rotation),
-                                endAngle: .degrees(rotation + 360)
-                            ),
-                            lineWidth: 1.8
+                                center: .center
+                            )
+                            .rotationEffect(.degrees(isRotating ? 360 : 0))
+                            .animation(
+                                Animation.linear(duration: 1.8).repeatForever(autoreverses: false),
+                                value: isRotating
+                            )
+                            .mask(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(lineWidth: 2.0)
+                            )
                         )
-                        .shadow(color: Color.orange.opacity(0.8), radius: 5)
+                        .shadow(color: Color.orange.opacity(0.85), radius: 4)
                         .onAppear {
-                            rotation = 0
-                            withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
-                                rotation = 360
-                            }
+                            isRotating = true
                         }
                 } else if vpn.isConnected {
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.5)
+                        .stroke(
+                            Color(red: 0.2, green: 0.9, blue: 0.55),
+                            lineWidth: isPulsing ? 1.8 : 1.0
+                        )
                         .shadow(
-                            color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.9 : 0.2),
-                            radius: isPulsing ? 6 : 2
+                            color: Color(red: 0.2, green: 0.95, blue: 0.6).opacity(isPulsing ? 0.9 : 0.2),
+                            radius: isPulsing ? 5 : 2
+                        )
+                        .opacity(isPulsing ? 1.0 : 0.75)
+                        .animation(
+                            Animation.easeInOut(duration: 1.2).repeatForever(autoreverses: true),
+                            value: isPulsing
                         )
                         .onAppear {
-                            isPulsing = false
-                            withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                                isPulsing = true
-                            }
+                            isPulsing = true
                         }
                 } else {
                     RoundedRectangle(cornerRadius: 6)
@@ -556,31 +608,36 @@ struct MacOSMenuBar: View {
 
 struct ConnectingLinearBorder: View {
     var cornerRadius: CGFloat = 13
-    @State private var rotation: Double = 0
+    @State private var isRotating = false
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius)
-            .stroke(
+            .stroke(Color.orange.opacity(0.15), lineWidth: 1.5)
+            .overlay(
                 AngularGradient(
                     gradient: Gradient(colors: [
                         Color.clear,
                         Color.clear,
-                        Color.orange.opacity(0.15),
+                        Color.orange.opacity(0.25),
                         Color.orange,
-                        Color(red: 1.0, green: 0.9, blue: 0.6)
+                        Color(red: 1.0, green: 0.95, blue: 0.7),
+                        Color.clear
                     ]),
-                    center: .center,
-                    startAngle: .degrees(rotation),
-                    endAngle: .degrees(rotation + 360)
-                ),
-                lineWidth: 2
+                    center: .center
+                )
+                .rotationEffect(.degrees(isRotating ? 360 : 0))
+                .animation(
+                    Animation.linear(duration: 1.8).repeatForever(autoreverses: false),
+                    value: isRotating
+                )
+                .mask(
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .stroke(lineWidth: 2.2)
+                )
             )
-            .shadow(color: Color.orange.opacity(0.6), radius: 8)
+            .shadow(color: Color.orange.opacity(0.8), radius: 8)
             .onAppear {
-                rotation = 0
-                withAnimation(.linear(duration: 2.0).repeatForever(autoreverses: false)) {
-                    rotation = 360
-                }
+                isRotating = true
             }
     }
 }
@@ -593,16 +650,21 @@ struct ConnectedPulseBorder: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: cornerRadius)
-            .stroke(Color(red: 0.2, green: 0.88, blue: 0.55), lineWidth: 1.8)
+            .stroke(
+                Color(red: 0.2, green: 0.9, blue: 0.55),
+                lineWidth: isPulsing ? 2.0 : 1.2
+            )
             .shadow(
-                color: Color(red: 0.2, green: 0.88, blue: 0.55).opacity(isPulsing ? 0.8 : 0.25),
-                radius: isPulsing ? 10 : 4
+                color: Color(red: 0.2, green: 0.95, blue: 0.6).opacity(isPulsing ? 0.9 : 0.25),
+                radius: isPulsing ? 9 : 2
+            )
+            .opacity(isPulsing ? 1.0 : 0.75)
+            .animation(
+                Animation.easeInOut(duration: 1.2).repeatForever(autoreverses: true),
+                value: isPulsing
             )
             .onAppear {
-                isPulsing = false
-                withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: true)) {
-                    isPulsing = true
-                }
+                isPulsing = true
             }
     }
 }
