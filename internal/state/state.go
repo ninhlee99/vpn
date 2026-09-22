@@ -50,32 +50,21 @@ type State struct {
 // without needing its own copy of the path.
 const Dir = "/var/run/vpn"
 
-func runDir() (string, error) {
-	// /var/run requires root, which connect/disconnect/repair already need
-	// (route and utun changes are root-only on macOS), so the state file
-	// lives there rather than under the user's home.
-	if err := os.MkdirAll(Dir, 0o755); err != nil {
-		return "", err
-	}
-	return Dir, nil
-}
-
-func path() (string, error) {
-	dir, err := runDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "state.json"), nil
+// path is where the state file lives, without creating anything — used by
+// Load, which must work read-only and unprivileged (e.g. plain `vpn
+// status`, before this user has ever connected and root has never had a
+// reason to create Dir yet).
+func path() string {
+	return filepath.Join(Dir, "state.json")
 }
 
 // Load reads the current state, returning a DISCONNECTED state if no file
-// exists (nothing has ever connected).
+// (or not even Dir itself) exists yet — nothing has ever connected, and
+// this must not try to create Dir itself: Dir lives under /var/run, so
+// only Save (always called while privilege.Elevate has this process at
+// root — see connect/disconnect/repair/uninstall) is allowed to create it.
 func Load() (*State, error) {
-	p, err := path()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(p)
+	data, err := os.ReadFile(path())
 	if os.IsNotExist(err) {
 		return &State{Phase: PhaseDisconnected}, nil
 	}
@@ -89,12 +78,14 @@ func Load() (*State, error) {
 	return &s, nil
 }
 
-// Save persists s atomically.
+// Save persists s atomically. Callers must already be root (see
+// privilege.Elevate) — /var/run/vpn is root-owned, and this is what
+// creates it on first use.
 func (s *State) Save() error {
-	p, err := path()
-	if err != nil {
+	if err := os.MkdirAll(Dir, 0o755); err != nil {
 		return err
 	}
+	p := path()
 	s.UpdatedAt = time.Now()
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
