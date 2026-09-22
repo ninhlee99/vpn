@@ -848,7 +848,6 @@ struct SecondaryButtonStyle: ButtonStyle {
 
 // MARK: - App Delegate & Menu Bar Setup
 
-@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem?
@@ -858,7 +857,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppDelegate.shared = self
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
-        updateIcon(phase: VPNManager.shared.currentPhase)
+        let initialPhase = MainActor.assumeIsolated {
+            VPNManager.shared.currentPhase
+        }
+        updateIcon(phase: initialPhase)
 
         guard let button = statusItem?.button else { return }
         button.action = #selector(togglePopover(_:))
@@ -868,9 +870,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
 
-        VPNManager.shared.onStatusChanged = { [weak self] phase in
-            Task { @MainActor in
-                self?.updateIcon(phase: phase)
+        MainActor.assumeIsolated {
+            VPNManager.shared.onStatusChanged = { [weak self] phase in
+                Task { @MainActor in
+                    self?.updateIcon(phase: phase)
+                }
             }
         }
     }
@@ -880,26 +884,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.image = makeMenuBarIcon(phase: phase)
     }
 
-    @objc @MainActor func togglePopover(_ sender: AnyObject?) {
+    @objc func togglePopover(_ sender: AnyObject?) {
         guard let button = statusItem?.button else { return }
         if popover.isShown {
             popover.performClose(sender)
         } else {
-            VPNManager.shared.syncFromDisk()
+            MainActor.assumeIsolated {
+                VPNManager.shared.syncFromDisk()
+            }
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             NSApp.activate(ignoringOtherApps: true)
         }
     }
 }
 
-@main
-struct AppMain {
-    @MainActor
-    static func main() {
-        let app = NSApplication.shared
-        let delegate = AppDelegate()
-        app.delegate = delegate
-        app.setActivationPolicy(.accessory)
-        app.run()
-    }
-}
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.setActivationPolicy(.accessory)
+_ = NSApplicationMain(CommandLine.argc, CommandLine.unsafeArgv)
