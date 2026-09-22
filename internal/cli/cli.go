@@ -141,7 +141,13 @@ func cmdInit(args []string) error {
 		*password = v
 	}
 
-	p := &config.Profile{Server: *server, ServerID: *serverID, DefaultAccount: *username}
+	// FullTunnel: true, matching `profile add`'s own default — without this,
+	// a Profile struct's zero-value bool silently comes out false here (Go
+	// has no "unset" sentinel for bool the way "" works for string), so a
+	// profile made via `init` would route through the VPN only for the
+	// LNS's own subnet, not general Internet traffic, with nothing telling
+	// the user that's what happened.
+	p := &config.Profile{Server: *server, ServerID: *serverID, DefaultAccount: *username, FullTunnel: true}
 	cfg.AddProfile(*profileName, p)
 	p.Accounts[*username] = &config.Account{Username: *username}
 
