@@ -75,12 +75,10 @@ final class VPNManager: ObservableObject {
     @Published var currentTunDevice: String = ""
     @Published var errorMessage: String?
     @Published var activeAlert: VPNAlertInfo?
-    @Published var isStaleSession: Bool = false
-    @Published var autoRetryCountdown: Int = 0
-
     var onStatusChanged: ((String) -> Void)?
     private var pollTimer: Timer?
-    private var retryTimer: Timer?
+    private var retryWorkItem: DispatchWorkItem?
+    private var retryCount = 0
 
     /// The phase the user just asked for, shown optimistically until the CLI's state file
     /// agrees. Without it the 1s poll read the not-yet-updated state.json and flipped the
@@ -185,11 +183,31 @@ final class VPNManager: ObservableObject {
 
         if phase == "FAILED" {
             applyFailure(stage: failStage, detail: failDetail)
-        } else if phase == "CONNECTED" || phase == "CONNECTING" {
+            // A stale ("already logged in") failure makes applyFailure begin
+            // a fresh CONNECTING intent right above, silently, instead of
+            // showing an alert — re-apply the same masking the block at the
+            // top of this function does, so the plain `update(\.currentPhase,
+            // phase)` etc. below reflect that *within this same tick*
+            // instead of briefly showing FAILED for the ~1s until the next
+            // poll catches up (which is exactly the flash this exists to
+            // avoid).
+            if let intent = pendingIntent {
+                phase = intent.phase
+                activeProf = intent.profile ?? activeProf
+            }
+        } else if phase == "CONNECTED" {
             update(\.errorMessage, nil)
             update(\.activeAlert, nil)
-            update(\.isStaleSession, false)
             cancelAutoRetry()
+        } else if phase == "CONNECTING" {
+            update(\.errorMessage, nil)
+            update(\.activeAlert, nil)
+            // Deliberately not cancelAutoRetry() here: a silent stale-session
+            // retry (see applyFailure) displays as CONNECTING too while it
+            // waits out its backoff, and this branch runs on every 1s poll
+            // tick — cancelling here would kill that backoff before it ever
+            // gets to retry. connect()/disconnect()/toggleConnect() already
+            // cancel any pending retry themselves when the user acts.
         }
 
         let oldPhase = currentPhase
@@ -227,17 +245,23 @@ final class VPNManager: ObservableObject {
     }
 
     private func applyFailure(stage: String, detail: String) {
+        if detail.contains("already logged in") || detail.contains("You are already logged in") {
+            // Silent, automatic recovery: the app already knows exactly how
+            // to fix this itself (disconnect + repair + reconnect — see
+            // scheduleStaleSessionRetry), so there's nothing here for a
+            // person to decide. No alert, no button — the UI just stays on
+            // "Đang kết nối..." for as long as this keeps happening. An
+            // explicit OFF tap still works at any point (toggleConnect/
+            // disconnect() both cancel this via cancelAutoRetry()).
+            guard let profileName = activeProfileName else { return }
+            _ = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 60)
+            scheduleStaleSessionRetry(profileName: profileName)
+            return
+        }
+
         let alert: VPNAlertInfo
         let message: String
-        if detail.contains("already logged in") || detail.contains("You are already logged in") {
-            alert = VPNAlertInfo(
-                kind: .sessionStale,
-                title: "Session Stale",
-                message: "Tài khoản đang có phiên đăng nhập trên máy chủ ('Already logged in').",
-                detail: detail
-            )
-            message = "Session Stale: Tài khoản đang có phiên đăng nhập trên server."
-        } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
+        if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
             alert = VPNAlertInfo(
                 kind: .authFailed,
                 title: "Authentication Failed",
@@ -273,40 +297,63 @@ final class VPNManager: ObservableObject {
 
         update(\.activeAlert, alert)
         update(\.errorMessage, message)
-        update(\.isStaleSession, alert.kind == .sessionStale)
-        if alert.kind == .sessionStale, autoRetryCountdown == 0, retryTimer == nil, let prof = activeProfileName {
-            startAutoRetry(profileName: prof)
-        }
     }
 
-    func startAutoRetry(profileName: String) {
-        cancelAutoRetry()
-        autoRetryCountdown = 5
-        retryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            Task { @MainActor in
-                guard let self = self else { timer.invalidate(); return }
-                if self.autoRetryCountdown > 1 {
-                    self.autoRetryCountdown -= 1
-                } else {
-                    self.cancelAutoRetry()
-                    self.cleanupAndForceConnect(profileName: profileName)
-                }
-            }
+    /// Schedules the next silent recovery attempt for a stale ("already
+    /// logged in") server session, with exponential backoff (1s, 2s, 4s,
+    /// 8s, capped at 15s) so repeated conflicts don't hammer the server
+    /// while it's still releasing the old session — each new failure calls
+    /// this again (via applyFailure), growing the delay, until it succeeds
+    /// or cancelAutoRetry() stops it.
+    private func scheduleStaleSessionRetry(profileName: String) {
+        retryWorkItem?.cancel()
+        retryCount += 1
+        let delay = min(pow(2.0, Double(retryCount - 1)), 15.0)
+        let work = DispatchWorkItem { [weak self] in
+            self?.cleanupAndForceConnect(profileName: profileName, silent: true)
         }
+        retryWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func cancelAutoRetry() {
-        retryTimer?.invalidate()
-        retryTimer = nil
-        update(\.autoRetryCountdown, 0)
+        retryWorkItem?.cancel()
+        retryWorkItem = nil
+        retryCount = 0
     }
 
+    /// Coalesces rapid taps on the switch: N taps within `toggleDebounceInterval`
+    /// of each other now produce at most one real `vpn connect`/`disconnect`
+    /// call — the one matching the *last* tap, once tapping settles. Before
+    /// this, every single tap fired its own real CLI invocation (a real
+    /// negotiation attempt against the server), which is exactly what
+    /// produced "already logged in" conflicts and visible state flicker
+    /// under fast repeated ON/OFF/ON toggling. The optimistic UI still
+    /// updates on every tap via beginIntent below, so the switch stays
+    /// instantly responsive regardless of the debounce.
+    private var toggleDebounce: DispatchWorkItem?
+    private static let toggleDebounceInterval: TimeInterval = 0.5
+
     func toggleConnect(profile: VPNProfileItem) {
-        if profile.isConnected || profile.isConnecting {
-            disconnect()
-        } else {
-            connect(profileName: profile.name)
+        let wantsOn = !(profile.isConnected || profile.isConnecting)
+        let profileName = profile.name
+        cancelAutoRetry()
+        update(\.errorMessage, nil)
+
+        let id = wantsOn
+            ? beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
+            : beginIntent(phase: "DISCONNECTED", profile: nil, timeout: 10)
+
+        toggleDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            if wantsOn {
+                self?.performConnect(profileName: profileName, id: id)
+            } else {
+                self?.performDisconnect(id: id)
+            }
         }
+        toggleDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.toggleDebounceInterval, execute: work)
     }
 
     /// 0ms optimistic UI update, held by a PendingIntent until the CLI catches up.
@@ -317,7 +364,6 @@ final class VPNManager: ObservableObject {
         update(\.currentPhase, phase)
         update(\.isConnecting, phase == "CONNECTING")
         update(\.isConnected, false)
-        update(\.isStaleSession, false)
         update(\.activeAlert, nil)
         if let profile = profile {
             update(\.activeProfileName, profile)
@@ -367,11 +413,18 @@ final class VPNManager: ObservableObject {
     }
 
     func connect(profileName: String) {
+        toggleDebounce?.cancel()
         cancelAutoRetry()
         update(\.errorMessage, nil)
         let id = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
+        performConnect(profileName: profileName, id: id)
+    }
 
-        // Serialized so rapid off/on toggles can't interleave their CLI calls.
+    /// The actual `vpn connect` invocation, given an intent already begun by
+    /// the caller (connect() for an explicit/immediate call, or
+    /// toggleConnect()'s debounced switch). Serialized on operationQueue so
+    /// rapid off/on toggles can't interleave their CLI calls.
+    private func performConnect(profileName: String, id: Int) {
         let cli = self.cli
         operationQueue.async {
             Self.launchConnect(cli: cli, profileName: profileName) {
@@ -380,10 +433,17 @@ final class VPNManager: ObservableObject {
         }
     }
 
-    func cleanupAndForceConnect(profileName: String) {
-        cancelAutoRetry()
+    /// `silent` is true when this is the automatic stale-session recovery
+    /// (see scheduleStaleSessionRetry) — no "cleaning up..." message, and
+    /// deliberately *not* cancelAutoRetry() here: doing so would reset
+    /// retryCount back to 0 on every attempt, defeating the backoff (each
+    /// new failure schedules the next retry itself, via applyFailure).
+    func cleanupAndForceConnect(profileName: String, silent: Bool = false) {
         let id = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
-        update(\.errorMessage, "Đang đăng xuất phiên cũ & kết nối lại...")
+        if !silent {
+            cancelAutoRetry()
+            update(\.errorMessage, "Đang đăng xuất phiên cũ & kết nối lại...")
+        }
 
         let cli = self.cli
         operationQueue.async {
@@ -401,10 +461,15 @@ final class VPNManager: ObservableObject {
     }
 
     func disconnect() {
+        toggleDebounce?.cancel()
         cancelAutoRetry()
         update(\.errorMessage, nil)
         let id = beginIntent(phase: "DISCONNECTED", profile: nil, timeout: 10)
+        performDisconnect(id: id)
+    }
 
+    /// The actual `vpn disconnect` invocation — see performConnect's comment.
+    private func performDisconnect(id: Int) {
         let cli = self.cli
         operationQueue.async {
             Self.run(cli, ["disconnect"])
@@ -970,8 +1035,11 @@ struct MenuBarPopupView: View {
                 .padding(.horizontal, 16)
             }
 
-            // Error or Stale Session Notice / Alert Card
-            if let alert = vpn.activeAlert ?? (vpn.errorMessage != nil ? VPNAlertInfo(kind: vpn.isStaleSession ? .sessionStale : .generic, title: vpn.isStaleSession ? "Session Stale" : "Lỗi kết nối", message: vpn.errorMessage ?? "", detail: "") : nil) {
+            // Error Notice / Alert Card. A stale ("already logged in") server
+            // session never reaches here — it's recovered silently, with no
+            // alert at all (see VPNManager.applyFailure) — so `.sessionStale`
+            // no longer appears as a real activeAlert.kind.
+            if let alert = vpn.activeAlert ?? (vpn.errorMessage != nil ? VPNAlertInfo(kind: .generic, title: "Lỗi kết nối", message: vpn.errorMessage ?? "", detail: "") : nil) {
                 VStack(alignment: .leading, spacing: 8) {
                     // Header Badge & Title
                     HStack(spacing: 6) {
@@ -1010,49 +1078,10 @@ struct MenuBarPopupView: View {
                                 .lineLimit(2)
                         }
 
-                        if alert.kind == .sessionStale && vpn.autoRetryCountdown > 0 {
-                            Text("Đang dọn dẹp tiến trình cũ... Tự động thử lại sau \(vpn.autoRetryCountdown)s")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(Color(red: 0.3, green: 0.85, blue: 1.0))
-                                .padding(.top, 2)
-                        }
                     }
 
                     // Action Controls
-                    if alert.kind == .sessionStale {
-                        HStack(spacing: 8) {
-                            Button(action: {
-                                vpn.cleanupAndForceConnect(profileName: vpn.activeProfileName ?? "")
-                            }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "arrow.clockwise")
-                                    Text("Dọn dẹp & Thử lại ngay")
-                                }
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .fill(Color.orange.opacity(0.9))
-                                )
-                            }
-                            .buttonStyle(.plain)
-
-                            Button(action: {
-                                vpn.cancelAutoRetry()
-                                vpn.disconnect()
-                            }) {
-                                Text("Hủy")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(.gray)
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 5)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.top, 2)
-                    } else if alert.kind == .authFailed {
+                    if alert.kind == .authFailed {
                         HStack(spacing: 8) {
                             if let actProf = vpn.profiles.first(where: { $0.name == vpn.activeProfileName }) {
                                 Button(action: {
