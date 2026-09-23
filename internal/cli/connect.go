@@ -44,24 +44,46 @@ func cmdConnect(args []string) error {
 	if os.Getenv(daemonChildEnv) == "1" {
 		return doConnect(*profileName, *accountName, *timeout, *verbose)
 	}
-	return spawnDaemon(args, *timeout)
+
+	// Tear down any previous connect/connected session, fork the new
+	// daemon, and wait for it to record its own PID — all under one lock,
+	// so a `disconnect` invoked right after this call is guaranteed to see
+	// either the old session or the new one, never neither. See
+	// engine.PrepareNewConnect/ClaimNewConnect's doc comments for the race
+	// this closes; it's why this can't just be two separate steps like it
+	// used to be.
+	var cmd *exec.Cmd
+	err := engine.WithConnectLock(func() error {
+		if err := engine.PrepareNewConnect(); err != nil {
+			return fmt.Errorf("disconnect previous session: %w", err)
+		}
+		var err error
+		cmd, err = startDaemon(args)
+		if err != nil {
+			return err
+		}
+		return engine.ClaimNewConnect(cmd.Process.Pid, 2*time.Second)
+	})
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Connecting in the background (pid %d)...\n", cmd.Process.Pid)
+	return awaitOutcome(*timeout)
 }
 
-// spawnDaemon re-execs this same binary as a detached background process
+// startDaemon re-execs this same binary as a detached background process
 // (new session via Setsid, stdio pointed at /dev/null so it survives the
-// parent's terminal closing) running the real connect logic, then polls
-// state until it reaches CONNECTED/FAILED (or timeout) so the caller gets
-// immediate feedback instead of a background process starting silently
-// with no way to tell whether it actually worked.
-func spawnDaemon(args []string, timeout time.Duration) error {
+// parent's terminal closing) running the real connect logic.
+func startDaemon(args []string) (*exec.Cmd, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return fmt.Errorf("locate own executable to re-exec as a daemon: %w", err)
+		return nil, fmt.Errorf("locate own executable to re-exec as a daemon: %w", err)
 	}
 
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", os.DevNull, err)
+		return nil, fmt.Errorf("open %s: %w", os.DevNull, err)
 	}
 	defer devnull.Close()
 
@@ -72,10 +94,18 @@ func spawnDaemon(args []string, timeout time.Duration) error {
 	cmd.Stderr = devnull
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from this terminal's session
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start background connect: %w", err)
+		return nil, fmt.Errorf("start background connect: %w", err)
 	}
-	fmt.Printf("Connecting in the background (pid %d)...\n", cmd.Process.Pid)
+	return cmd, nil
+}
 
+// awaitOutcome polls state until the just-started daemon reaches
+// CONNECTED/FAILED (or timeout) so the caller gets immediate feedback
+// instead of a background process starting silently with no way to tell
+// whether it actually worked. Deliberately outside WithConnectLock — a
+// negotiation can take the full timeout, and a disconnect issued while
+// it's in flight must be able to interrupt it promptly, not wait for it.
+func awaitOutcome(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		time.Sleep(300 * time.Millisecond)
@@ -112,7 +142,7 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 	}
 	psk, err := keychain.GetPSK(pName)
 	if err != nil {
-		return fmt.Errorf("no PSK stored for profile %q — run `vpn init` or `vpn profile add`: %w", pName, err)
+		return fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`: %w", pName, err)
 	}
 	password, err := keychain.GetPassword(pName, aName)
 	if err != nil {
