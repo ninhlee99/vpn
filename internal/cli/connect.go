@@ -41,6 +41,13 @@ func cmdConnect(args []string) error {
 		return doConnect(*profileName, *accountName, *timeout, *verbose)
 	}
 
+	// Catch configuration problems here, where the user can see them: the
+	// daemon's stderr is /dev/null, so if it exited over a missing account
+	// or secret, all this process could report is that it never started.
+	if _, err := resolveTarget(*profileName, *accountName); err != nil {
+		return err
+	}
+
 	// Tear down any previous connect/connected session, fork the new
 	// daemon, and wait for it to record its own PID — all under one lock,
 	// so a `disconnect` invoked right after this call is guaranteed to see
@@ -124,19 +131,44 @@ func awaitOutcome(timeout time.Duration) error {
 
 // doConnect is the actual connect logic, run inside the detached daemon
 // process spawned by spawnDaemon (see daemonChildEnv).
-func doConnect(profileName, accountName string, timeout time.Duration, verbose bool) error {
+// connectTarget is the profile/account pair a connect resolves to.
+type connectTarget struct {
+	profileName string
+	profile     *config.Profile
+	accountName string
+}
+
+// resolveTarget resolves the profile and account a connect would use and
+// confirms both secrets are stored (without reading them) — the checks
+// shared by the foreground preflight in cmdConnect and doConnect itself.
+func resolveTarget(profileName, accountName string) (*connectTarget, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pName, p, err := cfg.Profile(profileName)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	aName, _, err := p.Account(accountName)
 	if err != nil {
+		return nil, fmt.Errorf("profile %q: %w — run `vpn account add %s <username> --default`", pName, err, pName)
+	}
+	if !keychain.HasPSK(pName) {
+		return nil, fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`", pName)
+	}
+	if !keychain.HasPassword(pName, aName) {
+		return nil, fmt.Errorf("no password stored for account %q — run `vpn account add %s %s`", aName, pName, aName)
+	}
+	return &connectTarget{profileName: pName, profile: p, accountName: aName}, nil
+}
+
+func doConnect(profileName, accountName string, timeout time.Duration, verbose bool) error {
+	t, err := resolveTarget(profileName, accountName)
+	if err != nil {
 		return err
 	}
+	pName, p, aName := t.profileName, t.profile, t.accountName
 	psk, err := keychain.GetPSK(pName)
 	if err != nil {
 		return fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`: %w", pName, err)

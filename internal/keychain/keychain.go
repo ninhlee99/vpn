@@ -59,6 +59,17 @@ func DeletePassword(profile, account string) error {
 	return delete_(passwordService(profile, account), account)
 }
 
+// HasPSK reports whether a profile's PSK is stored, without reading it.
+func HasPSK(profile string) bool {
+	return Has(pskService(profile), profile)
+}
+
+// HasPassword reports whether an account's password is stored, without
+// reading it.
+func HasPassword(profile, account string) bool {
+	return Has(passwordService(profile, account), account)
+}
+
 // Has reports whether a secret exists without retrieving its value.
 func Has(service, account string) bool {
 	cmd := exec.Command(sysbin.Security, "find-generic-password", "-s", service, "-a", account)
