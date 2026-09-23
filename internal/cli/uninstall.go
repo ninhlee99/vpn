@@ -20,7 +20,7 @@ func cmdUninstall(args []string) error {
 	}
 
 	if !*yes {
-		fmt.Println("This will remove: /usr/local/bin/vpn, the log, state, and every saved profile/account (including PSK/passwords in Keychain).")
+		fmt.Println("This will remove: " + installPath + ", the log, state, and every saved profile/account (including PSK/passwords in Keychain).")
 		fmt.Print("Proceed? [y/N] ")
 		reader := bufio.NewReader(os.Stdin)
 		line, _ := reader.ReadString('\n')
@@ -67,15 +67,19 @@ func cmdUninstall(args []string) error {
 		if err := os.Remove(engine.LogPath()); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", engine.LogPath(), err)
 		}
+		// Delete the binary itself — safe on Unix even though it's the file
+		// this running process's own image was exec'd from (removing a
+		// directory entry doesn't touch an already-open/already-mapped
+		// inode, so this process keeps running fine).
+		if err := os.Remove(installPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove %s: %w", installPath, err)
+		}
+		// OwnerFile only after the binary is gone: a setuid binary left
+		// without it refuses to run at all (see privilege.CheckOwner), so a
+		// failed removal above must not also strand the user with a
+		// binary they can no longer uninstall.
 		if err := os.Remove(privilege.OwnerFile); err != nil && !os.IsNotExist(err) {
 			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", privilege.OwnerFile, err)
-		}
-		// Delete the binary itself last — safe on Unix even though it's
-		// the file this running process's own image was exec'd from
-		// (removing a directory entry doesn't touch an already-open/
-		// already-mapped inode, so this process keeps running fine).
-		if err := os.Remove("/usr/local/bin/vpn"); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove /usr/local/bin/vpn: %w", err)
 		}
 		return nil
 	})

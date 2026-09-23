@@ -82,7 +82,7 @@ Usage:
   vpn status [--json]
   vpn repair
   vpn logs [-f]
-  vpn update                        download and install latest release binary
+  vpn update [--force]              install the latest signed release if newer (--force: reinstall/downgrade)
   vpn uninstall [-y]                remove vpn entirely: binary, log, state, all profiles/accounts (Keychain included)
   vpn version
 `)
