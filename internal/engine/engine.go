@@ -174,10 +174,20 @@ func Connect(cfg Config) error {
 		}
 		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
 
+		outSA, err := newESPSA(qm.Outbound)
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IPSEC_FAILURE", "set up outbound ESP SA", err)
+		}
+		inSA, err := newESPSA(qm.Inbound)
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IPSEC_FAILURE", "set up inbound ESP SA", err)
+		}
 		espT := &espTransport{
 			sess: sess,
-			out:  &ipsec.SA{SPI: qm.Outbound.SPI, EncKey: qm.Outbound.EncKey, AuthKey: qm.Outbound.AuthKey},
-			in:   &ipsec.SA{SPI: qm.Inbound.SPI, EncKey: qm.Inbound.EncKey, AuthKey: qm.Inbound.AuthKey},
+			out:  outSA,
+			in:   inSA,
 			repairRoute: func() error {
 				return privilege.Elevate(func() error {
 					return rtSnapshot.ProtectServer(serverIP.String())
@@ -350,6 +360,30 @@ func Connect(cfg Config) error {
 // warnNoPushedDNS is surfaced by connect/status when the LNS assigned no DNS
 // servers under full tunnel (see Connect).
 const warnNoPushedDNS = "VPN server pushed no DNS servers: DNS lookups keep using this network's resolvers, and any on the local network bypass the VPN"
+
+// newESPSA turns one direction of Quick Mode's result into the data-plane
+// SA for exactly the transform that was negotiated.
+func newESPSA(c ike.ChildSA) (*ipsec.SA, error) {
+	var cipher ipsec.Cipher
+	switch c.Transform.Encryption {
+	case ike.Enc3DES:
+		cipher = ipsec.Cipher3DESCBC
+	case ike.EncAES:
+		cipher = ipsec.CipherAESCBC
+	default:
+		return nil, fmt.Errorf("negotiated ESP encryption %d has no data-plane implementation", c.Transform.Encryption)
+	}
+	var integrity ipsec.Integrity
+	switch c.Transform.Hash {
+	case ike.HashSHA1:
+		integrity = ipsec.IntegHMACSHA1_96
+	case ike.HashSHA256:
+		integrity = ipsec.IntegHMACSHA256_128
+	default:
+		return nil, fmt.Errorf("negotiated ESP integrity %d has no data-plane implementation", c.Transform.Hash)
+	}
+	return ipsec.NewSA(c.SPI, cipher, integrity, c.EncKey, c.AuthKey)
+}
 
 // dnsServerStrings collects the LNS-provided DNS servers as strings,
 // skipping any that are absent or 0.0.0.0 (the LNS declining to supply

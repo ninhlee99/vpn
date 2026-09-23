@@ -400,6 +400,12 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	if err != nil {
 		return fmt.Errorf("IKE_PROPOSAL_MISMATCH: %w", err)
 	}
+	// The responder may only pick one of our transforms. Main Mode's HASH_R
+	// covers the SA we offered (SAi_b), not this choice, so nothing later
+	// would catch a substituted one.
+	if !offeredIKE(chosen, transforms) {
+		return fmt.Errorf("IKE_PROPOSAL_MISMATCH: server chose a transform we never offered (encryption %d, %d-bit key, hash %d, group %d)", chosen.Encryption, cipherKeyLen(chosen)*8, chosen.Hash, chosen.Group)
+	}
 	s.Transform = chosen
 	vpnlog.Info(stage, "MM2 received (server chose transform)", vpnlog.Fields{
 		"encryption": chosen.Encryption, "hash": chosen.Hash, "group": chosen.Group, "nat_t_vendor": peerSupportsNATT,
@@ -617,6 +623,17 @@ func informationalIV(hashAlg int, lastPhase1IV []byte, messageID uint32, blockLe
 		return nil, err
 	}
 	return seed[:blockLen], nil
+}
+
+// offeredIKE reports whether a Phase 1 choice matches one of our offers.
+func offeredIKE(chosen Transform, offered []Transform) bool {
+	for _, o := range offered {
+		if o.Encryption == chosen.Encryption && cipherKeyLen(o) == cipherKeyLen(chosen) &&
+			o.Hash == chosen.Hash && o.Group == chosen.Group && o.AuthMethod == chosen.AuthMethod {
+			return true
+		}
+	}
+	return false
 }
 
 // checkServerID enforces the profile's server_id against the responder's

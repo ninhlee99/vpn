@@ -1,6 +1,7 @@
 package ike
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -35,8 +36,26 @@ const (
 // port 4500 for NAT-T.
 const encapUDPTransport = 4
 
-// Authentication Algorithm values (RFC 2407 §4.5).
-const authHMACSHA1 = 2
+// Authentication Algorithm values (RFC 2407 §4.5; HMAC-SHA2-256 is IANA
+// value 5, RFC 4868 §2.4, with a 128-bit truncated ICV).
+const (
+	authHMACSHA1   = 2
+	authHMACSHA256 = 5
+)
+
+// espAuthAlgorithm maps a proposal's hash to the ESP authentication
+// algorithm it names — "aes256-sha256" means HMAC-SHA2-256 integrity, not
+// SHA-1 with a SHA-256 label.
+func espAuthAlgorithm(hash int) (uint16, error) {
+	switch hash {
+	case HashSHA1:
+		return authHMACSHA1, nil
+	case HashSHA256:
+		return authHMACSHA256, nil
+	default:
+		return 0, fmt.Errorf("unsupported ESP integrity hash %d", hash)
+	}
+}
 
 const payloadNATOA = 21 // RFC 3947 §5.1, same wire shape as an ID payload.
 
@@ -86,8 +105,12 @@ func marshalESPTransform(number uint8, t Transform, nextPayload uint8) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
+	auth, err := espAuthAlgorithm(t.Hash)
+	if err != nil {
+		return nil, err
+	}
 	var attrs []byte
-	attrs = append(attrs, encodeAttrTV(ipsecAttrAuthAlgorithm, authHMACSHA1)...)
+	attrs = append(attrs, encodeAttrTV(ipsecAttrAuthAlgorithm, auth)...)
 	attrs = append(attrs, encodeAttrTV(ipsecAttrEncapsulateMode, encapUDPTransport)...)
 	attrs = append(attrs, encodeAttrTV(ipsecAttrLifeType, lifeTypeSeconds)...)
 	attrs = append(attrs, encodeAttrTV(ipsecAttrLifeDuration, uint16(t.LifeSecs))...)
@@ -214,16 +237,68 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 		}
 		switch attrType {
 		case ipsecAttrAuthAlgorithm:
-			t.Hash = int(val) // reused: HMAC-SHA1==2 happens to coincide with IKE's HashSHA1 value
+			switch val {
+			case authHMACSHA1:
+				t.Hash = HashSHA1
+			case authHMACSHA256:
+				t.Hash = HashSHA256
+			default:
+				return chosenESP{}, fmt.Errorf("unsupported ESP authentication algorithm %d", val)
+			}
 		case ipsecAttrKeyLength:
 			t.KeyBits = int(val)
 		}
 		data = data[consumed:]
 	}
+	if t.Hash == 0 {
+		return chosenESP{}, fmt.Errorf("ESP transform carries no authentication algorithm")
+	}
 	if t.Encryption == EncAES && t.KeyBits == 0 {
 		t.KeyBits = 128
 	}
 	return chosenESP{SPI: spiVal, Transform: t}, nil
+}
+
+// offeredESP reports whether the responder's choice is one of the
+// transforms we proposed — it may only pick, never invent (RFC 2408
+// §4.2): accepting anything else would let it select e.g. single DES,
+// which the parser recognizes but this client never offers.
+func offeredESP(chosen Transform, offered []Transform) bool {
+	for _, o := range offered {
+		if o.Encryption == chosen.Encryption && o.Hash == chosen.Hash && cipherKeyLen(o) == cipherKeyLen(chosen) {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyQuickModeHash2 checks QM2's HASH(2), RFC 2409 §5.5:
+//
+//	HASH(2) = prf(SKEYID_a, M-ID | Ni_b | <QM2 after the HASH payload>)
+//
+// where the trailing part is every payload after HASH, headers included,
+// excluding the encryption padding — the mirror of HASH(1). Without it
+// nothing authenticates QM2: IKEv1 CBC encryption carries no integrity of
+// its own, so the responder's SA choice, nonce and SPI would be accepted
+// as received, bit flips and all.
+func verifyQuickModeHash2(hashAlg int, skeyidA []byte, msgID uint32, ni []byte, firstType uint8, payloads []RawPayload, plain []byte) error {
+	if firstType != PayloadHash || len(payloads) == 0 {
+		return fmt.Errorf("QM2 does not start with a HASH payload")
+	}
+	hashLen := 4 + len(payloads[0].Body)
+	total := 0
+	for _, p := range payloads {
+		total += 4 + len(p.Body)
+	}
+	data := append(append(beUint32(msgID), ni...), plain[hashLen:total]...)
+	want, err := prf(hashAlg, skeyidA, data)
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal(want, payloads[0].Body) {
+		return fmt.Errorf("QM2 HASH(2) mismatch — response not authenticated by the IKE SA")
+	}
+	return nil
 }
 
 func quickModeHash3(hashAlg int, skeyidA []byte, msgID uint32, niB, nrB []byte) ([]byte, error) {
@@ -281,7 +356,14 @@ func espKeyLens(t Transform) (encLen, authLen int) {
 			encLen = t.KeyBits / 8
 		}
 	}
-	authLen = 20 // HMAC-SHA1 key length (RFC2404) regardless of the 96-bit truncated ICV
+	// HMAC key length is the hash's full output size, independent of the
+	// truncated ICV (RFC 2404 §3, RFC 4868 §2.1.1).
+	switch t.Hash {
+	case HashSHA256:
+		authLen = 32
+	default:
+		authLen = 20
+	}
 	return
 }
 
@@ -411,10 +493,19 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 	if peerSABody == nil || peerNonce == nil {
 		return nil, fmt.Errorf("IPSEC_FAILURE: QM2 missing SA or Nonce")
 	}
+	if err := verifyQuickModeHash2(s.Transform.Hash, s.Keys.SKEYIDa, msgID, ni, respHdr.NextPayload, payloads, plainResp); err != nil {
+		return nil, fmt.Errorf("IPSEC_FAILURE: %w", err)
+	}
 	chosen, err := parseChosenESPSA(peerSABody)
 	if err != nil {
 		return nil, fmt.Errorf("IPSEC_FAILURE: %w", err)
 	}
+	if !offeredESP(chosen.Transform, transforms) {
+		return nil, fmt.Errorf("IPSEC_FAILURE: responder chose an ESP transform we never offered (encryption %d, %d-bit key, hash %d)", chosen.Transform.Encryption, cipherKeyLen(chosen.Transform)*8, chosen.Transform.Hash)
+	}
+	vpnlog.Info(stage, "ESP transform negotiated", vpnlog.Fields{
+		"encryption": chosen.Transform.Encryption, "key_bits": cipherKeyLen(chosen.Transform) * 8, "hash": chosen.Transform.Hash,
+	})
 
 	// QM3: HDR*, HASH(3) — acknowledges completion, RFC 2409 §5.5.
 	hash3, err := quickModeHash3(s.Transform.Hash, s.Keys.SKEYIDa, msgID, ni, peerNonce)
