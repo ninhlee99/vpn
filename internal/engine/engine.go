@@ -127,15 +127,17 @@ func Connect(cfg Config) error {
 			}
 			st.Phase = state.PhaseFailed
 			st.FailStage = stage
-			// Include the cause: `vpn connect` and the menu bar app only
-			// see state.json, and the app tells failures apart by this text
-			// (e.g. "already logged in", "CHAP authentication rejected",
-			// "authenticator response"). A bare stage label left them all
-			// looking alike.
-			st.FailDetail = detail
-			if err != nil {
-				st.FailDetail = fmt.Sprintf("%s: %v", detail, err)
-			}
+			// Include the real underlying error, not just the generic
+			// stage label passed in `detail` ("PPP negotiation", "IKEv1
+			// Phase 1 negotiation", ...). The UI's failure classification
+			// (session-stale vs. wrong-credentials vs. IKE/route failure)
+			// pattern-matches against this string for things like "already
+			// logged in" or "CHAP authentication rejected" — without the
+			// real text, every PPP-stage failure looked identical to the
+			// UI regardless of whether the server actually said "wrong
+			// password" or "you're already logged in", so the dedicated
+			// stale-session auto-retry flow could never trigger.
+			st.FailDetail = fmt.Sprintf("%s: %v", detail, err)
 			_ = st.Save()
 			vpnlog.Error(stage, detail, vpnlog.Fields{"err": err})
 			return fmt.Errorf("%s: %s: %w", stage, detail, err)
