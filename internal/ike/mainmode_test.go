@@ -36,3 +36,31 @@ func TestFloatToNATTReplacesSocketAndDestination(t *testing.T) {
 		t.Fatal("pre-NAT-T socket remains usable")
 	}
 }
+
+func TestCheckServerID(t *testing.T) {
+	ipv4 := MarshalIPv4ID(net.ParseIP("203.0.113.7"))
+	fqdn := MarshalID(IDTypeFQDN, []byte("vpn.example.com"))
+	unknown := MarshalID(9, []byte{0xde, 0xad})
+
+	cases := []struct {
+		name    string
+		want    string
+		body    []byte
+		wantErr bool
+	}{
+		{"empty server_id accepts anything", "", unknown, false},
+		{"matching IPv4", "203.0.113.7", ipv4, false},
+		{"mismatching IPv4", "203.0.113.8", ipv4, true},
+		{"matching FQDN", "vpn.example.com", fqdn, false},
+		// Previously skipped entirely: only ID_IPV4_ADDR was compared.
+		{"mismatching FQDN", "vpn.other.com", fqdn, true},
+		{"unknown ID type never matches", "203.0.113.7", unknown, true},
+		{"truncated payload", "203.0.113.7", []byte{1, 0}, true},
+	}
+	for _, c := range cases {
+		err := checkServerID(c.want, c.body)
+		if (err != nil) != c.wantErr {
+			t.Errorf("%s: err=%v, wantErr=%v", c.name, err, c.wantErr)
+		}
+	}
+}

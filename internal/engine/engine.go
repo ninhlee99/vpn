@@ -272,6 +272,14 @@ func Connect(cfg Config) error {
 			st.DNSServers = snap.Servers
 			st.DNSApplied = true
 			vpnlog.Info("ENGINE", "DNS applied", vpnlog.Fields{"service": service, "servers": dnsServers})
+		} else if cfg.FullTunnel {
+			// Not an error — some LNSes simply don't push DNS — but the
+			// system keeps its current resolvers, and one on the local
+			// network (e.g. the Wi-Fi router) is reached via its on-link
+			// route, outside the tunnel: every lookup is visible to that
+			// network.
+			st.Warnings = append(st.Warnings, warnNoPushedDNS)
+			vpnlog.Error("ENGINE", warnNoPushedDNS, nil)
 		}
 
 		st.Phase = state.PhaseConnected
@@ -315,17 +323,33 @@ func Connect(cfg Config) error {
 			_ = dnsSnap.Restore()
 		}
 		_ = rtSnapshot.Restore()
-		_ = state.Clear()
 
 		if pumpErr != nil && sigCtx.Err() == nil {
-			// Stopped for a reason other than the signal we were waiting for.
-			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr})
+			// Stopped for a reason other than the signal we were waiting
+			// for. The tunnel fails open (routes/DNS restored above), so
+			// record that loudly for `vpn status` instead of looking like
+			// an ordinary disconnect.
+			failed := &state.State{
+				Phase:      state.PhaseFailed,
+				Profile:    cfg.ProfileName,
+				Account:    cfg.AccountName,
+				Server:     cfg.Server,
+				FailStage:  "TUNNEL_FAILURE",
+				FailDetail: fmt.Sprintf("tunnel dropped (%v) — traffic now goes over the normal network WITHOUT VPN protection; run `vpn connect` again", pumpErr),
+			}
+			_ = failed.Save()
+			vpnlog.Error("ENGINE", "data plane stopped unexpectedly; traffic now bypasses the VPN", vpnlog.Fields{"err": pumpErr})
 			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
 		}
+		_ = state.Clear()
 		vpnlog.Info("ENGINE", "disconnected", nil)
 		return nil
 	})
 }
+
+// warnNoPushedDNS is surfaced by connect/status when the LNS assigned no DNS
+// servers under full tunnel (see Connect).
+const warnNoPushedDNS = "VPN server pushed no DNS servers: DNS lookups keep using this network's resolvers, and any on the local network bypass the VPN"
 
 // dnsServerStrings collects the LNS-provided DNS servers as strings,
 // skipping any that are absent or 0.0.0.0 (the LNS declining to supply
@@ -359,7 +383,9 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error
 				}
 				return
 			}
-			if n == 0 {
+			// Only IPv4 is negotiated (IPCP, never IPV6CP): framing any
+			// other packet as ppp.ProtoIP would hand the LNS garbage.
+			if n == 0 || buf[0]>>4 != 4 {
 				continue
 			}
 			if err := pppT.SendFrame(ppp.ProtoIP, buf[:n]); err != nil {

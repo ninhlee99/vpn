@@ -44,6 +44,10 @@ type State struct {
 	DNSService string   `json:"dns_service,omitempty"`
 	DNSServers []string `json:"dns_servers,omitempty"`
 	DNSApplied bool     `json:"dns_applied,omitempty"`
+
+	// Warnings are privacy caveats about the live connection (e.g. the LNS
+	// pushed no DNS servers) that connect and status surface to the user.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Dir is where the state file lives — exported so `uninstall` can remove it
@@ -92,6 +96,9 @@ func (s *State) Save() error {
 		return err
 	}
 	tmp := p + ".tmp"
+	// World-readable on purpose: the menu bar app polls this file directly
+	// as the unprivileged user. It holds no secrets — profile/account
+	// names, server host, tunnel address and DNS snapshot only.
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return err
 	}

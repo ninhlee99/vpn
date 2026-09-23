@@ -116,6 +116,7 @@ func awaitOutcome(timeout time.Duration) error {
 		switch st.Phase {
 		case state.PhaseConnected:
 			fmt.Printf("Connected (local IP %s, device %s).\n", st.LocalIP, st.TunDevice)
+			printWarnings(st)
 			return nil
 		case state.PhaseFailed:
 			return fmt.Errorf("%s: %s", st.FailStage, st.FailDetail)
@@ -199,7 +200,14 @@ func cmdStatus(args []string) error {
 		fmt.Printf("Last failure: %s (%s)\n", s.FailStage, s.FailDetail)
 	}
 	fmt.Printf("Updated: %s\n", s.UpdatedAt.Format(time.RFC3339))
+	printWarnings(s)
 	return nil
+}
+
+func printWarnings(s *state.State) {
+	for _, w := range s.Warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
+	}
 }
 
 func cmdRepair(args []string) error {

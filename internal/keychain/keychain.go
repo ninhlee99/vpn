@@ -7,7 +7,9 @@ package keychain
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os/exec"
 	"strings"
 )
@@ -67,31 +69,91 @@ func Has(service, account string) bool {
 	return cmd.Run() == nil
 }
 
+// set writes the secret through `security -i` (interactive mode, commands
+// read from stdin) instead of `add-generic-password -w <secret>`: argv of a
+// running process is visible to every local user via `ps`, stdin is not.
+// -U: update in place if it already exists, instead of erroring.
 func set(service, account, secret string) error {
-	// -U: update in place if it already exists, instead of erroring.
-	cmd := exec.Command(securityBin, "add-generic-password",
-		"-U",
-		"-s", service,
-		"-a", account,
-		"-w", secret,
-	)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("store secret in Keychain: %w: %s", err, strings.TrimSpace(stderr.String()))
+	line, err := interactiveCommand("add-generic-password", "-U", "-s", service, "-a", account, "-w", secret)
+	if err != nil {
+		return err
 	}
-	return nil
-}
-
-func get(service, account string) (string, error) {
-	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account, "-w")
+	cmd := exec.Command(securityBin, "-i")
+	cmd.Stdin = strings.NewReader(line)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("store secret in Keychain: %w: %s", err, strings.TrimSpace(stderr.String()+" "+stdout.String()))
+	}
+	return nil
+}
+
+// interactiveCommand renders one `security -i` command line: every argument
+// double-quoted, with `\` and `"` backslash-escaped (the escaping security's
+// interactive parser understands). A newline cannot be represented inside a
+// single command line, so it is rejected rather than silently truncating.
+func interactiveCommand(args ...string) (string, error) {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		if strings.ContainsAny(a, "\r\n") {
+			return "", fmt.Errorf("Keychain values must not contain line breaks")
+		}
+		a = strings.ReplaceAll(a, `\`, `\\`)
+		a = strings.ReplaceAll(a, `"`, `\"`)
+		quoted[i] = `"` + a + `"`
+	}
+	return strings.Join(quoted, " ") + "\n", nil
+}
+
+// get uses -g (password line on stderr) rather than -w: -w prints the raw
+// value for plain ASCII but silently switches to bare hex for anything else
+// (e.g. a Vietnamese or emoji password), which is indistinguishable from a
+// password that genuinely is a hex string. -g marks the two cases apart —
+// see parsePasswordLine.
+func get(service, account string) (string, error) {
+	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account, "-g")
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard // item attributes, not needed
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("secret not found in Keychain (service=%s account=%s): %w", service, account, err)
 	}
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	for _, line := range strings.Split(stderr.String(), "\n") {
+		if v, ok, err := parsePasswordLine(line); ok {
+			return v, err
+		}
+	}
+	return "", fmt.Errorf("unexpected `security find-generic-password -g` output for service=%s account=%s", service, account)
+}
+
+// parsePasswordLine decodes the `password: ...` line printed by
+// `security find-generic-password -g`, which takes one of three shapes:
+//
+//	password:                          (empty secret)
+//	password: "value"                  (printable ASCII without `"` or `\`)
+//	password: 0x<HEX>  "<escaped>"     (anything else — the hex is authoritative)
+func parsePasswordLine(line string) (value string, ok bool, err error) {
+	const prefix = "password:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", false, nil
+	}
+	rest := strings.TrimPrefix(strings.TrimPrefix(line, prefix), " ")
+	switch {
+	case rest == "":
+		return "", true, nil
+	case strings.HasPrefix(rest, "0x"):
+		hexPart, _, _ := strings.Cut(rest[2:], " ")
+		b, err := hex.DecodeString(hexPart)
+		if err != nil {
+			return "", true, fmt.Errorf("decode Keychain password hex: %w", err)
+		}
+		return string(b), true, nil
+	case len(rest) >= 2 && rest[0] == '"' && rest[len(rest)-1] == '"':
+		return rest[1 : len(rest)-1], true, nil
+	default:
+		return "", true, fmt.Errorf("unrecognized Keychain password line format")
+	}
 }
 
 func delete_(service, account string) error {

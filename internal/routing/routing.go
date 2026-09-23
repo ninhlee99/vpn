@@ -33,6 +33,20 @@ type Snapshot struct {
 	tunIface         string
 }
 
+// ipv4OverrideNets are the split-default halves that steer all IPv4 traffic
+// into the tunnel (see ApplyFullTunnel).
+var ipv4OverrideNets = []string{"0.0.0.0/1", "128.0.0.0/1"}
+
+// ipv6RejectNets are the same split-default trick for IPv6, pointed at a
+// -reject route instead of the tunnel: the LNS never negotiates IPV6CP, so
+// the tunnel cannot carry IPv6 — but without these, any IPv6-capable
+// network would keep sending IPv6 traffic straight out the physical
+// interface, bypassing the VPN entirely. -reject (ICMP unreachable) rather
+// than -blackhole so dual-stack clients fail over to IPv4 immediately
+// instead of timing out. Link-local and on-link LAN prefixes stay reachable
+// because their routes are more specific than /1, just like the IPv4 LAN.
+var ipv6RejectNets = []string{"::", "8000::"}
+
 // Capture reads the current default route. It must be called before any
 // other function in this package changes anything.
 func Capture() (*Snapshot, error) {
@@ -106,7 +120,8 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 // ApplyFullTunnel routes all IPv4 traffic through the tunnel interface using
 // the standard 0.0.0.0/1 + 128.0.0.0/1 split-default trick: two more-specific
 // routes outrank the existing default without deleting it, so Restore can
-// cleanly remove just the two overrides.
+// cleanly remove just the two overrides. It also rejects global IPv6 the
+// same way (see ipv6RejectNets), since the tunnel carries IPv4 only.
 // Idempotent (delete-then-add, like ProtectServer): callers may re-invoke
 // this periodically for the life of the connection — macOS's own network
 // reconciliation (IPMonitor) can silently reap these routes even with
@@ -114,15 +129,30 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 // long-lived session (see Watch).
 func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	s.tunIface = tunIface
-	for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+	// Set before the first add, so a partial failure still lets Restore
+	// remove whatever did get installed (every removal tolerates "not in
+	// table").
+	s.overrideAdded = true
+	for _, net := range ipv4OverrideNets {
 		_ = exec.Command(routeBin, "-n", "delete", "-net", net).Run()
 		cmd := exec.Command(routeBin, "-n", "add", "-static", "-net", net, "-interface", tunIface)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add override route %s via %s: %w (%s)", net, tunIface, err, strings.TrimSpace(string(out)))
 		}
 	}
-	s.overrideAdded = true
+	for _, net := range ipv6RejectNets {
+		_ = exec.Command(routeBin, ipv6RouteArgs("delete", net)...).Run()
+		cmd := exec.Command(routeBin, append(ipv6RouteArgs("add", net), "::1", "-reject", "-static")...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("add IPv6 reject route %s/1: %w (%s)", net, err, strings.TrimSpace(string(out)))
+		}
+	}
 	return nil
+}
+
+// ipv6RouteArgs is the `route` argv prefix addressing one IPv6 /1 half.
+func ipv6RouteArgs(verb, net string) []string {
+	return []string{"-n", verb, "-inet6", "-net", net, "-prefixlen", "1"}
 }
 
 // Watch periodically re-asserts ProtectServer (and ApplyFullTunnel, if it
@@ -166,9 +196,14 @@ func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, 
 func (s *Snapshot) Restore() error {
 	var errs []string
 	if s.overrideAdded {
-		for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		for _, net := range ipv4OverrideNets {
 			if out, err := exec.Command(routeBin, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove override route %s: %v (%s)", net, err, strings.TrimSpace(string(out))))
+			}
+		}
+		for _, net := range ipv6RejectNets {
+			if out, err := exec.Command(routeBin, ipv6RouteArgs("delete", net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+				errs = append(errs, fmt.Sprintf("remove IPv6 reject route %s/1: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
 		}
 	}

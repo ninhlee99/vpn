@@ -76,8 +76,10 @@ func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {
 			// whole tunnel over one bad datagram.
 			continue
 		}
+		// Never log the decrypted bytes themselves: this path carries the
+		// MS-CHAPv2 exchange and every tunnelled user packet in cleartext.
 		vpnlog.Debug("ENGINE", "ESP decrypted", vpnlog.Fields{
-			"next_header": nextHeader, "payload_len": len(payload), "hex": fmt.Sprintf("%x", payload),
+			"next_header": nextHeader, "payload_len": len(payload),
 		})
 		if nextHeader != protoUDP || len(payload) < 8 {
 			continue
