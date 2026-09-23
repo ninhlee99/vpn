@@ -299,7 +299,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               type="submit"
               className="px-4 py-1.5 rounded-xl text-[12.5px] font-semibold text-white bg-blue-600 hover:bg-blue-500 transition-colors shadow-sm"
             >
-              Lưu điểm nối
+              Lưu
             </button>
           </div>
         </form>
@@ -483,7 +483,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-[17px] font-bold tracking-tight text-white">TMS-VPN</span>
+                <span className="text-[17px] font-bold tracking-tight text-white">TMS VPN</span>
                 <span
                   className="w-2 h-2 rounded-full transition-colors duration-300 ml-0.5"
                   style={{
@@ -516,7 +516,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
           {/* Profile Section Header */}
           <div id="popover-profile-header" className="px-5 pt-4 pb-2.5 flex items-center justify-between">
             <span className="text-[11px] font-bold tracking-wider text-[#8e9aa8] uppercase">
-              HỒ SƠ VPN CÔNG TY
+              Danh sách
             </span>
             <button
               id="btn-add-profile"
@@ -524,7 +524,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               className="flex items-center gap-1 px-3 py-1 rounded-[8px] text-[12px] font-medium text-[#22d3ee] bg-[#0c2a38]/60 border border-[#196b7d]/60 hover:bg-[#0c2a38] hover:border-[#22d3ee]/80 transition-all active:scale-95"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Thêm điểm nối</span>
+              <span>Thêm</span>
             </button>
           </div>
 
@@ -671,7 +671,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                               className="w-full text-left px-3 py-1.5 hover:bg-white/10 flex items-center gap-2 cursor-pointer"
                             >
                               <Edit3 className="w-3.5 h-3.5 text-blue-400" />
-                              <span>Chỉnh sửa hồ sơ</span>
+                              <span>Chỉnh sửa</span>
                             </button>
 
                             <div className="my-1 border-t border-white/10" />
@@ -702,7 +702,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
           <div id="popover-bottom-controls" className="px-4 py-2.5 border-t border-white/[0.08] mt-3 flex items-center justify-between">
             <div className="flex items-center gap-2 text-[11.5px] text-[#8e9aa8]">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-              <span className="font-medium">TMS-VPN Client v1.0</span>
+              <span className="font-medium">TMS VPN Client v1.0</span>
             </div>
 
             <button

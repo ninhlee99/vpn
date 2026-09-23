@@ -401,15 +401,11 @@ final class VPNManager: ObservableObject {
         p.waitUntilExit()
     }
 
-    /// Tears down any existing session: graceful CLI disconnect, then kill a hung daemon.
-    nonisolated private static func teardown(cli: String) {
-        run(cli, ["disconnect"])
-        run("/usr/bin/pkill", ["-9", "-f", "vpn connect"])
-    }
-
     /// Launches `vpn connect` without blocking the serial queue — the spawner only exits once
     /// the daemon reports success or failure, which can take the full connect timeout, and a
-    /// toggle-off queued behind it would otherwise wait that long.
+    /// toggle-off queued behind it would otherwise wait that long. `vpn connect` tears down any
+    /// previous session itself, gracefully and by exact PID, before negotiating a new one (see
+    /// engine.EnsureDisconnected on the Go side) — this no longer needs to disconnect first.
     nonisolated private static func launchConnect(cli: String, profileName: String, onExit: @escaping @Sendable () -> Void) {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: cli)
@@ -430,9 +426,6 @@ final class VPNManager: ObservableObject {
         // Serialized so rapid off/on toggles can't interleave their CLI calls.
         let cli = self.cli
         operationQueue.async {
-            Self.teardown(cli: cli)
-            // Short cooldown for interface & PID release.
-            Thread.sleep(forTimeInterval: 0.3)
             Self.launchConnect(cli: cli, profileName: profileName) {
                 Task { @MainActor in self.endIntent(id) }
             }
@@ -446,7 +439,10 @@ final class VPNManager: ObservableObject {
 
         let cli = self.cli
         operationQueue.async {
-            Self.teardown(cli: cli)
+            // `repair` refuses to run against a live connect process, so this
+            // still needs an explicit disconnect first (unlike plain connect,
+            // which handles that itself) — see engine.Repair's doc comment.
+            Self.run(cli, ["disconnect"])
             Self.run(cli, ["repair"])
             // Give the server time to flush the RADIUS/L2TP session.
             Thread.sleep(forTimeInterval: 1.2)
@@ -463,7 +459,7 @@ final class VPNManager: ObservableObject {
 
         let cli = self.cli
         operationQueue.async {
-            Self.teardown(cli: cli)
+            Self.run(cli, ["disconnect"])
             Task { @MainActor in self.endIntent(id) }
         }
     }
@@ -737,7 +733,7 @@ struct CustomMenuButton: View {
 
     private func showNativeMenu() {
         let menu = NSMenu()
-        let editItem = NSMenuItem(title: "Chỉnh sửa hồ sơ", action: #selector(MenuHelper.editAction), keyEquivalent: "")
+        let editItem = NSMenuItem(title: "Chỉnh sửa", action: #selector(MenuHelper.editAction), keyEquivalent: "")
         let deleteItem = NSMenuItem(title: "Xóa hồ sơ", action: #selector(MenuHelper.deleteAction), keyEquivalent: "")
         deleteItem.attributedTitle = NSAttributedString(string: "Xóa hồ sơ", attributes: [.foregroundColor: NSColor.systemRed])
 
@@ -898,7 +894,7 @@ struct MenuBarPopupView: View {
                 .frame(width: 40, height: 40)
 
                 HStack(spacing: 6) {
-                    Text("TMS-VPN")
+                    Text("TMS VPN")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                     StatusDot(
@@ -968,7 +964,7 @@ struct MenuBarPopupView: View {
 
             // Subheader: Profile List Header
             HStack {
-                Text("HỒ SƠ VPN CÔNG TY")
+                Text("DANH SÁCH")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color(red: 0.52, green: 0.58, blue: 0.66))
                 Spacer()
@@ -976,7 +972,7 @@ struct MenuBarPopupView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "plus")
                             .font(.system(size: 10, weight: .bold))
-                        Text("Thêm điểm nối")
+                        Text("Thêm")
                             .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
@@ -1004,7 +1000,7 @@ struct MenuBarPopupView: View {
                     Text("Chưa có hồ sơ VPN nào")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.gray)
-                    Text("Nhấn nút \"+ Thêm điểm nối\" để cấu hình máy chủ đầu tiên.")
+                    Text("Nhấn nút \"+ Thêm\" để cấu hình máy chủ đầu tiên.")
                         .font(.system(size: 11))
                         .foregroundColor(Color.gray.opacity(0.7))
                         .multilineTextAlignment(.center)
@@ -1163,7 +1159,7 @@ struct MenuBarPopupView: View {
 
             // Footer Bar (Clean, NO Settings button)
             HStack {
-                Text("TMS-VPN Client")
+                Text("TMS VPN Client")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.gray.opacity(0.7))
 
@@ -1353,7 +1349,7 @@ struct ProfileFormSheet: View {
                 .keyboardShortcut(.cancelAction)
                 .buttonStyle(SecondaryButtonStyle())
 
-                Button(isEdit ? "Cập nhật hồ sơ" : "Lưu điểm nối") {
+                Button(isEdit ? "Cập nhật" : "Lưu") {
                     guard !name.trimmingCharacters(in: .whitespaces).isEmpty,
                           !server.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     

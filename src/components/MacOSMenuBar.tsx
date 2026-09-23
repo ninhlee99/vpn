@@ -136,7 +136,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               activeMenu === 'app' ? 'bg-white/20 text-white' : 'hover:bg-white/10 text-white'
             }`}
           >
-            TMS-VPN
+            TMS VPN
           </button>
           {activeMenu === 'app' && (
             <div className="absolute top-8 left-0 w-56 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
@@ -145,14 +145,14 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center gap-2"
               >
                 <Info className="w-3.5 h-3.5 opacity-70" />
-                <span>Giới thiệu TMS-VPN</span>
+                <span>Giới thiệu TMS VPN</span>
               </div>
               <div className="my-1 border-t border-white/10" />
               <div
                 onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
               >
-                <span>Ẩn TMS-VPN</span>
+                <span>Ẩn TMS VPN</span>
                 <span className="text-[12px] opacity-60">⌘H</span>
               </div>
               <div className="my-1 border-t border-white/10" />
@@ -165,7 +165,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>Thoát TMS-VPN</span>
+                  <span>Thoát TMS VPN</span>
                 </div>
                 <span className="text-[12px] opacity-60">⌘Q</span>
               </div>
@@ -263,7 +263,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               ? 'bg-white/20 text-white shadow-inner ring-1 ring-white/20'
               : 'hover:bg-white/10 text-slate-200'
           }`}
-          title="TMS-VPN"
+          title="TMS VPN"
         >
           {renderVpnIcon()}
         </button>
