@@ -175,12 +175,14 @@ func Connect(cfg Config) error {
 		// config, DNS) to unwind in reverse order if any step fails.
 		dev, err = tun.Open()
 		if err != nil {
+			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
 			_ = rtSnapshot.Restore()
 			return fail("TUN_FAILURE", "open utun device", err)
 		}
 		teardownPartial := func() {
 			dev.Close()
+			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
 			if dnsSnap != nil {
 				_ = dnsSnap.Restore()
@@ -267,6 +269,7 @@ func Connect(cfg Config) error {
 	// is no longer around to do it itself, not as the primary mechanism.
 	return privilege.Elevate(func() error {
 		dev.Close()
+		ppp.Terminate(pppT, 1)
 		l2tpTun.Close()
 		if dnsSnap != nil {
 			_ = dnsSnap.Restore()
