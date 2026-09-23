@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -46,6 +47,12 @@ type Config struct {
 	Verbose      bool
 }
 
+// errAbortedByDisconnect is Connect's internal sentinel for "a `disconnect`
+// arrived while still negotiating and this process cancelled itself in
+// response" — not a real connection failure, so it must never surface as a
+// FAILED state/alert to the UI.
+var errAbortedByDisconnect = errors.New("connect aborted: disconnected while negotiating")
+
 // Connect runs the full stage sequence and, on success, leaves the tunnel
 // interface up, routes/DNS applied, and state.Save()'d as CONNECTED. On any
 // failure, it restores whatever it had already changed before returning —
@@ -66,6 +73,14 @@ func Connect(cfg Config) error {
 		cfg.Timeout = 30 * time.Second
 	}
 
+	// Registered before anything else — including before the PID that lets
+	// `disconnect` find this process at all — and reused for the entire
+	// call (setup negotiation *and* the data-plane phase below) instead of
+	// two separate signal.NotifyContexts, so there is exactly one place
+	// that decides whether a termination was requested.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server}
 
 	var rtSnapshot *routing.Snapshot
@@ -84,9 +99,30 @@ func Connect(cfg Config) error {
 		if err := vpnlog.Init(cfg.Verbose); err != nil {
 			return fmt.Errorf("open log file: %w", err)
 		}
+		// Record PID together with the very first save, not only once
+		// CONNECTED (as before) — otherwise a `disconnect` issued while
+		// this process is still negotiating IKE/L2TP/PPP finds state.PID
+		// still zero, can't signal this process, and just clears the state
+		// file locally while this process keeps running and authenticating
+		// in the background. A `connect` started right after then races
+		// that orphan for the same account, which is what intermittently
+		// produced spurious PPP auth failures / stale "already logged in"
+		// sessions, and later state-file flicker, on rapid on/off/on
+		// toggling: the orphan can finish and overwrite state.json to
+		// CONNECTED well after the UI already believes it disconnected.
+		st.PID = os.Getpid()
 		_ = st.Save()
 
 		fail := func(stage, detail string, err error) error {
+			if sigCtx.Err() != nil {
+				// Cancelled by our own signal handler above, not a real
+				// failure — whatever was captured/applied so far has
+				// already been restored at each call site below, exactly
+				// like any other failure path.
+				_ = state.Clear()
+				vpnlog.Info("ENGINE", "connect aborted by disconnect", vpnlog.Fields{"stage": stage})
+				return errAbortedByDisconnect
+			}
 			st.Phase = state.PhaseFailed
 			st.FailStage = stage
 			st.FailDetail = detail
@@ -114,7 +150,7 @@ func Connect(cfg Config) error {
 			return fail("ROUTE_FAILURE", "determine local outbound IP", fmt.Errorf("no IPv4 on %s", rtSnapshot.DefaultInterface))
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+		ctx, cancel := context.WithTimeout(sigCtx, cfg.Timeout)
 		defer cancel()
 
 		sess, err := ike.EstablishPhase1(ctx, ike.Config{
@@ -236,7 +272,7 @@ func Connect(cfg Config) error {
 		}
 
 		st.Phase = state.PhaseConnected
-		st.PID = os.Getpid()
+		// st.PID was already recorded at the top of this closure.
 		st.TunDevice = dev.Name
 		st.LocalIP = ipcp.LocalIP.String()
 		st.SavedRoutes = true
@@ -247,20 +283,23 @@ func Connect(cfg Config) error {
 		return nil
 	})
 	if setupErr != nil {
+		if errors.Is(setupErr, errAbortedByDisconnect) {
+			// A deliberate, in-flight disconnect — already cleaned up and
+			// cleared inside fail() above; report success to the caller
+			// (the CLI's own `disconnect` is what's waiting on this).
+			return nil
+		}
 		return setupErr
 	}
 	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name})
-
-	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// macOS can silently reap the routes ProtectServer/ApplyFullTunnel just
 	// installed at any point during a long-lived session (see routing.go's
 	// Watch doc comment) — re-assert them periodically instead of trusting
 	// they stay in place for the whole connection.
-	go rtSnapshot.Watch(runCtx, privilege.Elevate, 10*time.Second)
+	go rtSnapshot.Watch(sigCtx, privilege.Elevate, 10*time.Second)
 
-	pumpErr := runDataPlane(runCtx, dev, pppT)
+	pumpErr := runDataPlane(sigCtx, dev, pppT)
 
 	// Tear down on the way out no matter why the pump stopped (signal or
 	// error) — the disconnect/repair CLI paths exist for when this process
@@ -274,7 +313,7 @@ func Connect(cfg Config) error {
 		_ = rtSnapshot.Restore()
 		_ = state.Clear()
 
-		if pumpErr != nil && runCtx.Err() == nil {
+		if pumpErr != nil && sigCtx.Err() == nil {
 			// Stopped for a reason other than the signal we were waiting for.
 			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr})
 			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
