@@ -142,7 +142,7 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 	}
 	psk, err := keychain.GetPSK(pName)
 	if err != nil {
-		return fmt.Errorf("no PSK stored for profile %q — add it in the TMS-VPN menu bar app or run `vpn profile add`: %w", pName, err)
+		return fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`: %w", pName, err)
 	}
 	password, err := keychain.GetPassword(pName, aName)
 	if err != nil {

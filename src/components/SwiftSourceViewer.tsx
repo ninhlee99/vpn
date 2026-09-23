@@ -848,7 +848,7 @@ struct MenuBarPopupView: View {
                 .frame(width: 40, height: 40)
 
                 HStack(spacing: 6) {
-                    Text("TMS-VPN")
+                    Text("TMS VPN")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                     Circle()
@@ -1105,7 +1105,7 @@ struct MenuBarPopupView: View {
 
             // Footer Bar (Clean, NO Settings button)
             HStack {
-                Text("TMS-VPN Client")
+                Text("TMS VPN Client")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.gray.opacity(0.7))
 

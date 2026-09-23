@@ -19,7 +19,7 @@ case "$(uname -m)" in
 esac
 
 echo "=================================================="
-echo "🛡️  INSTALLING TMS-VPN (CLI & MENU BAR UI)"
+echo "🛡️  INSTALLING TMS VPN (CLI & MENU BAR UI)"
 echo "=================================================="
 
 # --- Step 1: Install `vpn` CLI Backend ---
@@ -42,8 +42,8 @@ if curl -fsSL -o "$BIN" "$URL"; then
 fi
 
 # --- Step 2: Install Menu Bar UI (prebuilt universal app) ---
-echo "🎨 [2/2] Installing TMS-VPN Menu Bar UI..."
-APP_DIR="/Applications/TMS-VPN.app"
+echo "🎨 [2/2] Installing TMS VPN Menu Bar UI..."
+APP_DIR="/Applications/TMS VPN.app"
 APP_ZIP="$(mktemp -t vpn-app-zip).zip"
 
 APP_URL="https://github.com/ninhlee99/vpn/releases/latest/download/TMS-VPN.app.zip"
@@ -62,7 +62,7 @@ else
 fi
 
 echo "=================================================="
-echo "🎉 SUCCESS: TMS-VPN Engine & Menu Bar UI Installed!"
+echo "🎉 SUCCESS: TMS VPN Engine & Menu Bar UI Installed!"
 echo "👉 Menu Bar App: $APP_DIR"
 echo "👉 CLI Engine: /usr/local/bin/vpn"
 echo "=================================================="

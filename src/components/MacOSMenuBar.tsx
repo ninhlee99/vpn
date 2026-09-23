@@ -128,7 +128,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
           )}
         </div>
 
-        {/* TMS-VPN App Menu with Settings ⌘, */}
+        {/* TMS VPN App Menu with Settings ⌘, */}
         <div className="relative">
           <button
             onClick={() => setActiveMenu(activeMenu === 'app' ? null : 'app')}
@@ -252,9 +252,9 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
         </div>
       </div>
 
-      {/* Right Menu Items (System Tray + TMS-VPN Status Icon) */}
+      {/* Right Menu Items (System Tray + TMS VPN Status Icon) */}
       <div className="flex items-center gap-3">
-        {/* TMS-VPN Menu Bar Status Button (Target Trigger) */}
+        {/* TMS VPN Menu Bar Status Button (Target Trigger) */}
         <button
           id="menubar-tms-vpn-trigger"
           onClick={onTogglePopover}

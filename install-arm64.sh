@@ -6,7 +6,7 @@
 set -euo pipefail
 
 echo "=================================================="
-echo "🛡️  INSTALLING TMS-VPN (APPLE SILICON ARM64)"
+echo "🛡️  INSTALLING TMS VPN (APPLE SILICON ARM64)"
 echo "=================================================="
 
 URL="https://github.com/ninhlee99/vpn/releases/latest/download/vpn-darwin-arm64"
@@ -26,8 +26,8 @@ if curl -fsSL -o "$BIN" "$URL"; then
     echo "  -> CLI Installed: /usr/local/bin/vpn"
 fi
 
-echo "🎨 [2/2] Installing TMS-VPN Menu Bar UI..."
-APP_DIR="/Applications/TMS-VPN.app"
+echo "🎨 [2/2] Installing TMS VPN Menu Bar UI..."
+APP_DIR="/Applications/TMS VPN.app"
 APP_ZIP="$(mktemp -t vpn-app-zip).zip"
 
 APP_URL="https://github.com/ninhlee99/vpn/releases/latest/download/TMS-VPN.app.zip"
@@ -46,7 +46,7 @@ else
 fi
 
 echo "=================================================="
-echo "🎉 SUCCESS: TMS-VPN Engine & Menu Bar UI Installed!"
+echo "🎉 SUCCESS: TMS VPN Engine & Menu Bar UI Installed!"
 echo "👉 Menu Bar App: $APP_DIR"
 echo "👉 CLI Engine: /usr/local/bin/vpn"
 echo "=================================================="

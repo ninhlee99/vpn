@@ -21,7 +21,7 @@ Cả 3 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần
 
 ## Setup lần đầu
 
-Mở app **TMS-VPN** trên menu bar → **+ Thêm điểm nối**, nhập server, tài khoản, mật khẩu, PSK. App gọi CLI để lưu, PSK/password nằm trong Keychain.
+Mở app **TMS VPN** trên menu bar → **+ Thêm điểm nối**, nhập server, tài khoản, mật khẩu, PSK. App gọi CLI để lưu, PSK/password nằm trong Keychain.
 
 Hoặc từ terminal:
 
@@ -59,7 +59,7 @@ vpn profile remove <tên>                    # xoá profile (kèm PSK/password t
 vpn connect --profile <tên>                 # kết nối vào profile cụ thể
 ```
 
-Chọn server, bật/tắt kết nối và sửa hồ sơ hằng ngày thì dùng app TMS-VPN trên menu bar.
+Chọn server, bật/tắt kết nối và sửa hồ sơ hằng ngày thì dùng app TMS VPN trên menu bar.
 
 ## Sự cố
 

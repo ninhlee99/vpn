@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# TMS-VPN: Universal Binary Build Script (ARM64 + Intel x86_64)
+# TMS VPN: Universal Binary Build Script (ARM64 + Intel x86_64)
 # ==============================================================================
 
 set -euo pipefail
 
 OUTPUT_NAME="tms-vpn-bar"
-APP_NAME="TMS-VPN.app"
+APP_NAME="TMS VPN.app"
 BUILD_DIR="./build"
 
 echo "🚀 [1/3] Chuẩn bị môi trường build..."
@@ -29,8 +29,8 @@ echo "📦 [3/3] Đóng gói thành macOS Application Bundle ($APP_NAME)..."
 mkdir -p "$BUILD_DIR/$APP_NAME/Contents/MacOS"
 mkdir -p "$BUILD_DIR/$APP_NAME/Contents/Resources"
 
-cp "$BUILD_DIR/$OUTPUT_NAME" "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS-VPN"
-chmod +x "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS-VPN"
+cp "$BUILD_DIR/$OUTPUT_NAME" "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS VPN"
+chmod +x "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS VPN"
 
 cat <<EOF > "$BUILD_DIR/$APP_NAME/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -38,11 +38,11 @@ cat <<EOF > "$BUILD_DIR/$APP_NAME/Contents/Info.plist"
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>TMS-VPN</string>
+    <string>TMS VPN</string>
     <key>CFBundleIdentifier</key>
     <string>com.tms.vpn.menubar</string>
     <key>CFBundleName</key>
-    <string>TMS-VPN</string>
+    <string>TMS VPN</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -65,7 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = statusItem?.button else { return }
         
-        button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "TMS-VPN")
+        button.image = NSImage(systemSymbolName: "shield.fill", accessibilityDescription: "TMS VPN")
         button.action = #selector(togglePopover(_:))
         button.target = self
     }
@@ -97,7 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     filename: 'MenuBarPopupView.swift',
     path: 'Sources/TMSVPNMenuBar/Views/MenuBarPopupView.swift',
     category: 'views',
-    description: 'Giao diện Popup Menu Bar khớp 100% thiết kế TMS-VPN',
+    description: 'Giao diện Popup Menu Bar khớp 100% thiết kế TMS VPN',
     content: `import SwiftUI
 
 struct MenuBarPopupView: View {
@@ -123,7 +123,7 @@ struct MenuBarPopupView: View {
                 .frame(width: 42, height: 42)
 
                 HStack(spacing: 6) {
-                    Text("TMS-VPN")
+                    Text("TMS VPN")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
                     Circle()
@@ -205,7 +205,7 @@ struct MenuBarPopupView: View {
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "rectangle.portrait.and.arrow.right")
-                            Text("Thoát TMS-VPN").font(.system(size: 12, weight: .medium))
+                            Text("Thoát TMS VPN").font(.system(size: 12, weight: .medium))
                             Text("⌘Q").font(.system(size: 11, weight: .semibold)).foregroundColor(Color.gray.opacity(0.7))
                         }
                         .foregroundColor(Color.gray)

@@ -1,7 +1,7 @@
 name: release
 
 # Builds vpn-darwin-arm64/amd64 (Linux runner, pure Go cross-compile) and
-# TMS-VPN.app (macOS runner — Swift/AppKit/SwiftUI need a real Apple
+# TMS VPN.app (macOS runner — Swift/AppKit/SwiftUI need a real Apple
 # toolchain, unlike the Go CLI) on every push to main, and publishes them
 # together as assets on a new immutable GitHub Release per commit.
 # install.sh and `vpn update` use releases/latest/download, so they still
@@ -73,13 +73,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build TMS-VPN.app (universal — arm64 + Intel)
+      - name: Build TMS VPN.app (universal — arm64 + Intel)
         run: bash build.sh
 
       # ditto (not plain zip) preserves the bundle's resource forks/extended
       # attributes correctly — Apple's own documented way to zip an .app.
+      # The zip's own outer filename stays hyphenated (unlike the bundle
+      # inside it) purely so install.sh's curl URL never needs to carry an
+      # encoded space — the space in "TMS VPN.app" survives fine as an
+      # *entry name inside* the archive, which is all --keepParent needs.
       - name: Zip the app bundle
-        run: ditto -c -k --sequesterRsrc --keepParent build/TMS-VPN.app TMS-VPN.app.zip
+        run: ditto -c -k --sequesterRsrc --keepParent "build/TMS VPN.app" TMS-VPN.app.zip
 
       # The release already exists (created as a draft by build-cli) — this
       # just adds another asset to it, still while draft, so the final
