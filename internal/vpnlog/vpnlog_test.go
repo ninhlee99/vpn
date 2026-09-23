@@ -26,3 +26,10 @@ func TestRotate(t *testing.T) {
 		t.Fatalf("rotated file should be the 11-byte log, got %v %v", fi, err)
 	}
 }
+
+func TestFieldsStringIsSortedAndRedacted(t *testing.T) {
+	got := Fields{"payload_len": 72, "next_header": 17, "password": "hunter2"}.String()
+	if want := " next_header=17 password=[REDACTED] payload_len=72"; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}

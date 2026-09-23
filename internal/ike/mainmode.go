@@ -492,7 +492,10 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	}
 	vpnlog.Info(stage, "MM4 received", vpnlog.Fields{"nat_detected": s.NATDetected})
 
-	gxy := kp.SharedSecret(peerKE)
+	gxy, err := kp.SharedSecret(peerKE)
+	if err != nil {
+		return fmt.Errorf("MM4: %w", err)
+	}
 	keys, err := DerivePhase1Keys(chosen, []byte(cfg.PSK), ni, peerNonce, gxy, s.InitiatorSPI, s.ResponderSPI)
 	if err != nil {
 		return fmt.Errorf("derive Phase 1 keys: %w", err)

@@ -10,6 +10,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -71,15 +73,23 @@ func ensure() {
 // replaced with "[REDACTED]" before formatting.
 type Fields map[string]any
 
+// Keys are sorted so the same event always renders identically — map
+// iteration order is random, which made log lines hard to compare or grep.
 func (f Fields) String() string {
-	s := ""
-	for k, v := range f {
+	keys := make([]string, 0, len(f))
+	for k := range f {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := f[k]
 		if redactedKeys[k] {
 			v = "[REDACTED]"
 		}
-		s += fmt.Sprintf(" %s=%v", k, v)
+		fmt.Fprintf(&b, " %s=%v", k, v)
 	}
-	return s
+	return b.String()
 }
 
 // Info logs a status milestone (e.g. "IKE Phase 1 established"). Only
