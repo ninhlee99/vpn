@@ -80,15 +80,14 @@ func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", cfg.ServerHost, err)
 	}
-	// Bind our own source port to 500 too: some IKE responders key their
+	// Bind our own source port to 500 for the pre-NAT-T exchange: some IKE responders key their
 	// NAT-D "my view of your address" computation, and some firewalls'
 	// UDP/500 conntrack entries, on the client also using port 500 for the
 	// pre-NAT-T exchange — matching what every real IKE client does.
 	//
-	// Bind to cfg.LocalIP specifically, not the wildcard address: this is
-	// the one real OS socket this client ever opens for IKE/ESP (NAT-T just
-	// switches the *destination* port to 4500, staying on this same local
-	// socket — L2TP's "port 1701" is a virtual header this client builds
+	// Bind to cfg.LocalIP specifically, not the wildcard address: NAT-T
+	// replaces this UDP/500 socket with one bound to UDP/4500 after MM4.
+	// L2TP's "port 1701" is a virtual header this client builds
 	// inside the ESP payload in internal/engine/transport.go, never a real
 	// socket, so there's nothing to bind there). A wildcard bind lets the
 	// kernel repick the source address/interface for every sendto against
@@ -493,18 +492,12 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	s.Keys = keys
 
 	if s.NATDetected {
-		// RFC 3947 §3: only the *destination* port floats to 4500 — the
-		// client keeps its existing local socket/port. Confirmed live
-		// against the reference server: opening a brand new socket (any
-		// local port, including a fresh bind to 4500) makes the responder
-		// keep sending its encrypted Informational/Notify replies back to
-		// the *original* socket's port instead of the new one, because its
-		// Phase 1 state is tied to the 5-tuple from MM1, not just the SPIs.
-		// Reusing the same socket and only changing where we send avoids
-		// that mismatch entirely.
-		s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: 4500}
-		s.floated = true
-		vpnlog.Info(stage, "floated to UDP/4500 for NAT-T (same local socket)", nil)
+		// RFC 3947 §4 requires both ports to change to 4500 before MM5.
+		// Keeping the local socket on :500 works through permissive NATs,
+		// but IPsec-aware NATs can special-case that port and drop NAT-T ESP.
+		if err := s.floatToNATT(cfg.LocalIP); err != nil {
+			return err
+		}
 	}
 
 	// IV0 = hash(g^xi | g^xr), truncated to block size — RFC 2409 §5.
@@ -590,6 +583,28 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 
 	s.nextMsgID = 0
 	vpnlog.Timed(stage, "Phase 1 ESTABLISHED", start)
+	return nil
+}
+
+// floatToNATT replaces the pre-negotiation UDP/500 socket with UDP/4500.
+// Bind first so failure leaves the established Phase 1 socket intact.
+func (s *Session) floatToNATT(localIP net.IP) error {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: 4500})
+	if err != nil {
+		return fmt.Errorf("bind local UDP/4500 for NAT-T on %s: %w", localIP, err)
+	}
+	oldConn := s.conn
+	s.conn = conn
+	s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: 4500}
+	s.floated = true
+	if err := oldConn.Close(); err != nil {
+		conn.Close()
+		s.conn = oldConn
+		s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: 500}
+		s.floated = false
+		return fmt.Errorf("close pre-NAT-T UDP/500 socket: %w", err)
+	}
+	vpnlog.Info(stage, "floated to UDP/4500 for NAT-T", vpnlog.Fields{"local_port": 4500})
 	return nil
 }
 

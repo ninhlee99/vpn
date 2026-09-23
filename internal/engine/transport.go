@@ -3,7 +3,9 @@ package engine
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
+	"syscall"
 
 	"vpn/internal/ike"
 	"vpn/internal/ipsec"
@@ -19,9 +21,10 @@ import (
 // header plus the L2TP message) since this client never builds real IP
 // packets for its own control/data traffic, only the payload IPsec expects.
 type espTransport struct {
-	sess *ike.Session
-	out  *ipsec.SA
-	in   *ipsec.SA
+	sess        *ike.Session
+	out         *ipsec.SA
+	in          *ipsec.SA
+	repairRoute func() error
 }
 
 const (
@@ -34,15 +37,30 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	binary.BigEndian.PutUint16(udpHdr[0:2], l2tpPort) // src port
 	binary.BigEndian.PutUint16(udpHdr[2:4], l2tpPort) // dst port
 	binary.BigEndian.PutUint16(udpHdr[4:6], uint16(8+len(l2tpMsg)))
-	// checksum (udpHdr[6:8]) left 0 — optional for IPv4 UDP (RFC 768), and
-	// the payload is already integrity-protected by ESP's own ICV.
+	// Checksum remains zero. RFC 3948 §3.1.2 permits this for integrity-
+	// protected UDP transported by ESP: NAT changes the IP addresses used by
+	// a non-zero checksum's pseudo-header and cannot adjust encrypted ESP.
 	payload := append(udpHdr, l2tpMsg...)
 
 	pkt, err := t.out.Encrypt(payload, protoUDP)
 	if err != nil {
 		return fmt.Errorf("ESP encrypt: %w", err)
 	}
-	return t.sess.SendESP(pkt)
+	return sendWithRouteRetry(func() error { return t.sess.SendESP(pkt) }, t.repairRoute)
+}
+
+// sendWithRouteRetry repairs a route lost by macOS's route reconciler and
+// retries once. EHOSTUNREACH/ENETUNREACH means the kernel did not transmit
+// the datagram, so the retry cannot duplicate an ESP packet.
+func sendWithRouteRetry(send func() error, repairRoute func() error) error {
+	err := send()
+	if err == nil || repairRoute == nil || (!errors.Is(err, syscall.EHOSTUNREACH) && !errors.Is(err, syscall.ENETUNREACH)) {
+		return err
+	}
+	if repairErr := repairRoute(); repairErr != nil {
+		return fmt.Errorf("repair VPN server route after %w: %v", err, repairErr)
+	}
+	return send()
 }
 
 func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {

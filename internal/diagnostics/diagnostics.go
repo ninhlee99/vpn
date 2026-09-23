@@ -102,15 +102,22 @@ func Run(ctx context.Context, server string) *Report {
 	}
 
 	r.MTUProbes = probeMTU(target)
-	for _, p := range r.MTUProbes {
-		if !p.OK && p.Size >= 1400 && r.FailureStage == StageNone {
-			// A black hole above 1400 (the common PPPoE/VPN-in-VPN ceiling)
-			// is worth flagging even when connectivity otherwise looks fine.
-			r.FailureStage = StageMTU
-		}
+	if r.FailureStage == StageNone && mtuFailure(r.MTUProbes) {
+		// 1500 may fail on normal PPPoE links. VPN's default MRU is 1400,
+		// so only failing at that size is a preflight failure.
+		r.FailureStage = StageMTU
 	}
 
 	return r
+}
+
+func mtuFailure(probes []MTUProbe) bool {
+	for _, p := range probes {
+		if p.Size == 1400 {
+			return !p.OK
+		}
+	}
+	return false
 }
 
 func probeNetwork() Network {

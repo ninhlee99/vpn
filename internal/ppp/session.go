@@ -262,6 +262,43 @@ func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
 	return result, nil
 }
 
+// Terminate sends an LCP Terminate-Request and waits briefly for the peer's
+// Terminate-Ack (RFC 1661 §5.6), best-effort — a failure here just means the
+// LNS's own idle timeout will clean up the link instead. This matters beyond
+// tidiness: an LNS that never sees a Terminate-Request has no clean signal
+// that this PPP session (and the RADIUS/AAA login behind it) actually ended,
+// which can make it treat a same-user reconnect moments later as a
+// still-active duplicate session and reject the new MS-CHAPv2 auth. Skipping
+// straight to tearing down L2TP/IKE — as this client used to do — reproduced
+// exactly that: disconnect immediately followed by connect failed with
+// PPP_AUTH_FAILURE even though the credentials never changed.
+func Terminate(t Transport, id uint8) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := ControlPacket{Code: CodeTerminateRequest, Identifier: id}
+	if err := t.SendFrame(ProtoLCP, req.Marshal()); err != nil {
+		return
+	}
+	for {
+		frameCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		proto, payload, err := t.RecvFrame(frameCtx)
+		cancel()
+		if err != nil {
+			return
+		}
+		if proto != ProtoLCP {
+			continue
+		}
+		pkt, err := ParseControlPacket(payload)
+		if err != nil {
+			continue
+		}
+		if pkt.Code == CodeTerminateAck {
+			return
+		}
+	}
+}
+
 func runAuth(ctx context.Context, t Transport, username, password string) error {
 	for {
 		frameCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

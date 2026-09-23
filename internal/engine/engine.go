@@ -141,6 +141,11 @@ func Connect(cfg Config) error {
 			sess: sess,
 			out:  &ipsec.SA{SPI: qm.Outbound.SPI, EncKey: qm.Outbound.EncKey, AuthKey: qm.Outbound.AuthKey},
 			in:   &ipsec.SA{SPI: qm.Inbound.SPI, EncKey: qm.Inbound.EncKey, AuthKey: qm.Inbound.AuthKey},
+			repairRoute: func() error {
+				return privilege.Elevate(func() error {
+					return rtSnapshot.ProtectServer(serverIP.String())
+				})
+			},
 		}
 
 		hostName, _ := localHostName()
@@ -170,12 +175,14 @@ func Connect(cfg Config) error {
 		// config, DNS) to unwind in reverse order if any step fails.
 		dev, err = tun.Open()
 		if err != nil {
+			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
 			_ = rtSnapshot.Restore()
 			return fail("TUN_FAILURE", "open utun device", err)
 		}
 		teardownPartial := func() {
 			dev.Close()
+			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
 			if dnsSnap != nil {
 				_ = dnsSnap.Restore()
@@ -197,6 +204,12 @@ func Connect(cfg Config) error {
 			if err := rtSnapshot.ApplyFullTunnel(dev.Name); err != nil {
 				teardownPartial()
 				return fail("ROUTE_FAILURE", "apply full-tunnel default routes", err)
+			}
+			// Adding split-default routes can make macOS discard the existing
+			// cloned host route. Re-add the static exception before ESP sends.
+			if err := rtSnapshot.ProtectServer(serverIP.String()); err != nil {
+				teardownPartial()
+				return fail("ROUTE_FAILURE", "protect VPN server after full-tunnel routes", err)
 			}
 			vpnlog.Info("ENGINE", "full-tunnel routes applied", vpnlog.Fields{"device": dev.Name})
 		}
@@ -256,6 +269,7 @@ func Connect(cfg Config) error {
 	// is no longer around to do it itself, not as the primary mechanism.
 	return privilege.Elevate(func() error {
 		dev.Close()
+		ppp.Terminate(pppT, 1)
 		l2tpTun.Close()
 		if dnsSnap != nil {
 			_ = dnsSnap.Restore()
