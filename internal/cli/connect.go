@@ -13,12 +13,8 @@ import (
 	"vpn/internal/keychain"
 	"vpn/internal/privilege"
 	"vpn/internal/state"
+	"vpn/internal/sysbin"
 )
-
-// pathTail: absolute path, not bare "tail" — cmdLogs runs this while
-// privilege.Elevate is raised (see below), same PATH-hijack concern as
-// routing.go/dnsmgr.go/keychain.go.
-const pathTail = "/usr/bin/tail"
 
 // daemonChildEnv marks a re-exec'd `connect` invocation as the detached
 // background process itself, so it runs the real connect logic in place
@@ -232,7 +228,7 @@ func cmdLogs(args []string) error {
 	// permission denied, so briefly elevate just to read/tail it.
 	return privilege.Elevate(func() error {
 		if *follow {
-			c := exec.Command(pathTail, "-f", logPath)
+			c := exec.Command(sysbin.Tail, "-f", logPath)
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			return c.Run()

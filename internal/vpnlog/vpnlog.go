@@ -15,6 +15,12 @@ import (
 
 const Path = "/var/log/vpn.log"
 
+// RotatedPath keeps the previous log once Path outgrows maxSize, so the log
+// is bounded at roughly twice that without losing the most recent history.
+const RotatedPath = Path + ".1"
+
+const maxSize = 5 << 20 // 5 MiB
+
 var logger *log.Logger
 var verbose bool
 
@@ -32,6 +38,7 @@ func Init(v bool) error {
 	if err := os.MkdirAll(filepath.Dir(Path), 0o755); err != nil {
 		return err
 	}
+	rotate(Path, RotatedPath, maxSize)
 	f, err := os.OpenFile(Path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -42,6 +49,16 @@ func Init(v bool) error {
 	}
 	logger = log.New(w, "", log.LstdFlags)
 	return nil
+}
+
+// rotate moves path to rotated once it exceeds limit. Checked once per
+// process start (each connect is a fresh process), which is enough to keep
+// a long-lived install from growing the log without bound. Best effort: a
+// failure just means this run appends to the existing file.
+func rotate(path, rotated string, limit int64) {
+	if fi, err := os.Stat(path); err == nil && fi.Size() > limit {
+		_ = os.Rename(path, rotated)
+	}
 }
 
 func ensure() {

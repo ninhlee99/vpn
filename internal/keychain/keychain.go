@@ -12,15 +12,11 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"vpn/internal/sysbin"
 )
 
 const servicePrefix = "vpn"
-
-// Absolute path, not just "security" — this runs as root when called
-// from an elevated context (Connect reads secrets while privilege.Elevate
-// is raised), and a bare command name would be resolved via $PATH, which
-// a local non-root user fully controls — classic setuid PATH hijacking.
-const securityBin = "/usr/bin/security"
 
 // pskService/passwordService namespace Keychain entries per profile/account
 // so multiple VPN profiles and multiple accounts on the same profile never
@@ -65,7 +61,7 @@ func DeletePassword(profile, account string) error {
 
 // Has reports whether a secret exists without retrieving its value.
 func Has(service, account string) bool {
-	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account)
+	cmd := exec.Command(sysbin.Security, "find-generic-password", "-s", service, "-a", account)
 	return cmd.Run() == nil
 }
 
@@ -78,7 +74,7 @@ func set(service, account, secret string) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command(securityBin, "-i")
+	cmd := exec.Command(sysbin.Security, "-i")
 	cmd.Stdin = strings.NewReader(line)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -112,7 +108,7 @@ func interactiveCommand(args ...string) (string, error) {
 // password that genuinely is a hex string. -g marks the two cases apart —
 // see parsePasswordLine.
 func get(service, account string) (string, error) {
-	cmd := exec.Command(securityBin, "find-generic-password", "-s", service, "-a", account, "-g")
+	cmd := exec.Command(sysbin.Security, "find-generic-password", "-s", service, "-a", account, "-g")
 	var stderr bytes.Buffer
 	cmd.Stdout = io.Discard // item attributes, not needed
 	cmd.Stderr = &stderr
@@ -157,7 +153,7 @@ func parsePasswordLine(line string) (value string, ok bool, err error) {
 }
 
 func delete_(service, account string) error {
-	cmd := exec.Command(securityBin, "delete-generic-password", "-s", service, "-a", account)
+	cmd := exec.Command(sysbin.Security, "delete-generic-password", "-s", service, "-a", account)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

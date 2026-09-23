@@ -11,15 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-)
 
-// Absolute paths, not just "route"/"ifconfig" — routing.go's callers run
-// under privilege.Elevate (effective root), and a bare command name would
-// be resolved via $PATH, which a local non-root user fully controls —
-// classic setuid PATH hijacking.
-const (
-	routeBin    = "/sbin/route"
-	ifconfigBin = "/sbin/ifconfig"
+	"vpn/internal/sysbin"
 )
 
 // Snapshot is the pre-VPN routing state, captured once before any change so
@@ -50,7 +43,7 @@ var ipv6RejectNets = []string{"::", "8000::"}
 // Capture reads the current default route. It must be called before any
 // other function in this package changes anything.
 func Capture() (*Snapshot, error) {
-	out, err := exec.Command(routeBin, "-n", "get", "default").Output()
+	out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output()
 	if err != nil {
 		return nil, fmt.Errorf("read default route: %w", err)
 	}
@@ -89,8 +82,8 @@ func (s *Snapshot) ProtectServer(serverIP string) error {
 	s.VPNServerIP = serverIP
 	// Idempotent: delete-then-add so re-running connect after a crash
 	// doesn't fail on "route already exists".
-	_ = exec.Command(routeBin, "-n", "delete", "-host", serverIP).Run()
-	cmd := exec.Command(routeBin, "-n", "add", "-static", "-host", serverIP, s.DefaultGateway)
+	_ = exec.Command(sysbin.Route, "-n", "delete", "-host", serverIP).Run()
+	cmd := exec.Command(sysbin.Route, "-n", "add", "-static", "-host", serverIP, s.DefaultGateway)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("add host route to VPN server via %s: %w (%s)", s.DefaultGateway, err, strings.TrimSpace(string(out)))
 	}
@@ -111,7 +104,7 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 		args = append(args, "mtu", fmt.Sprintf("%d", mtu))
 	}
 	args = append(args, "up")
-	if out, err := exec.Command(ifconfigBin, args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(sysbin.Ifconfig, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("configure %s (%s -> %s): %w (%s)", iface, local, peer, err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -134,15 +127,15 @@ func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	// table").
 	s.overrideAdded = true
 	for _, net := range ipv4OverrideNets {
-		_ = exec.Command(routeBin, "-n", "delete", "-net", net).Run()
-		cmd := exec.Command(routeBin, "-n", "add", "-static", "-net", net, "-interface", tunIface)
+		_ = exec.Command(sysbin.Route, "-n", "delete", "-net", net).Run()
+		cmd := exec.Command(sysbin.Route, "-n", "add", "-static", "-net", net, "-interface", tunIface)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add override route %s via %s: %w (%s)", net, tunIface, err, strings.TrimSpace(string(out)))
 		}
 	}
 	for _, net := range ipv6RejectNets {
-		_ = exec.Command(routeBin, ipv6RouteArgs("delete", net)...).Run()
-		cmd := exec.Command(routeBin, append(ipv6RouteArgs("add", net), "::1", "-reject", "-static")...)
+		_ = exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).Run()
+		cmd := exec.Command(sysbin.Route, append(ipv6RouteArgs("add", net), "::1", "-reject", "-static")...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add IPv6 reject route %s/1: %w (%s)", net, err, strings.TrimSpace(string(out)))
 		}
@@ -197,18 +190,18 @@ func (s *Snapshot) Restore() error {
 	var errs []string
 	if s.overrideAdded {
 		for _, net := range ipv4OverrideNets {
-			if out, err := exec.Command(routeBin, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+			if out, err := exec.Command(sysbin.Route, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove override route %s: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
 		}
 		for _, net := range ipv6RejectNets {
-			if out, err := exec.Command(routeBin, ipv6RouteArgs("delete", net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+			if out, err := exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove IPv6 reject route %s/1: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
 		}
 	}
 	if s.hostRouteAdded && s.VPNServerIP != "" {
-		if out, err := exec.Command(routeBin, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+		if out, err := exec.Command(sysbin.Route, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 			errs = append(errs, fmt.Sprintf("remove VPN server host route: %v (%s)", err, strings.TrimSpace(string(out))))
 		}
 	}

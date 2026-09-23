@@ -24,6 +24,7 @@ import (
 	"vpn/internal/privilege"
 	"vpn/internal/routing"
 	"vpn/internal/state"
+	"vpn/internal/sysbin"
 	"vpn/internal/tun"
 	"vpn/internal/vpnlog"
 )
@@ -716,13 +717,8 @@ func resolveServer(host string) (net.IP, error) {
 	return ips[0], nil
 }
 
-// ifconfigBin: absolute path, not bare "ifconfig" — same PATH-hijack
-// concern as routing.go/dnsmgr.go/keychain.go (this runs while
-// privilege.Elevate is raised, inside Connect's setup phase).
-const ifconfigBin = "/sbin/ifconfig"
-
 func localOutboundIP(iface string) net.IP {
-	out, err := exec.Command(ifconfigBin, iface).Output()
+	out, err := exec.Command(sysbin.Ifconfig, iface).Output()
 	if err != nil {
 		return nil
 	}

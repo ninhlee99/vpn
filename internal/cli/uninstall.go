@@ -10,6 +10,7 @@ import (
 	"vpn/internal/keychain"
 	"vpn/internal/privilege"
 	"vpn/internal/state"
+	"vpn/internal/vpnlog"
 )
 
 func cmdUninstall(args []string) error {
@@ -64,8 +65,10 @@ func cmdUninstall(args []string) error {
 		if err := os.RemoveAll(state.Dir); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", state.Dir, err)
 		}
-		if err := os.Remove(engine.LogPath()); err != nil && !os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", engine.LogPath(), err)
+		for _, p := range []string{vpnlog.Path, vpnlog.RotatedPath} {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				fmt.Fprintf(os.Stderr, "warning: could not remove %s: %v\n", p, err)
+			}
 		}
 		// Delete the binary itself — safe on Unix even though it's the file
 		// this running process's own image was exec'd from (removing a

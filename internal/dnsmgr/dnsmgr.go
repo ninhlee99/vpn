@@ -8,11 +8,9 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-)
 
-// Absolute path, not just "networksetup" — see routing.go's comment on
-// the same pattern; this runs under privilege.Elevate (effective root).
-const networksetupBin = "/usr/sbin/networksetup"
+	"vpn/internal/sysbin"
+)
 
 // Snapshot is the pre-VPN DNS configuration for one network service.
 type Snapshot struct {
@@ -24,7 +22,7 @@ type Snapshot struct {
 // ServiceForInterface maps a BSD interface name (e.g. "en0") to the
 // networksetup service name (e.g. "Wi-Fi") that controls it.
 func ServiceForInterface(iface string) (string, error) {
-	out, err := exec.Command(networksetupBin, "-listallhardwareports").Output()
+	out, err := exec.Command(sysbin.Networksetup, "-listallhardwareports").Output()
 	if err != nil {
 		return "", fmt.Errorf("list hardware ports: %w", err)
 	}
@@ -46,7 +44,7 @@ func ServiceForInterface(iface string) (string, error) {
 
 // Capture reads the current DNS servers for service.
 func Capture(service string) (*Snapshot, error) {
-	out, err := exec.Command(networksetupBin, "-getdnsservers", service).Output()
+	out, err := exec.Command(sysbin.Networksetup, "-getdnsservers", service).Output()
 	if err != nil {
 		return nil, fmt.Errorf("read DNS servers for %s: %w", service, err)
 	}
@@ -74,7 +72,7 @@ func (s *Snapshot) Apply(servers []string) error {
 		return nil
 	}
 	args := append([]string{"-setdnsservers", s.Service}, servers...)
-	if out, err := exec.Command(networksetupBin, args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(sysbin.Networksetup, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("set DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
 	}
 	s.applied = true
@@ -91,7 +89,7 @@ func (s *Snapshot) Restore() error {
 	if len(s.Servers) > 0 {
 		args = append([]string{"-setdnsservers", s.Service}, s.Servers...)
 	}
-	if out, err := exec.Command(networksetupBin, args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(sysbin.Networksetup, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("restore DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
 	}
 	return nil

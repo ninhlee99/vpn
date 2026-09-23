@@ -11,16 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
-)
 
-// Absolute paths, not bare command names — same PATH-hijack concern as
-// routing.go/dnsmgr.go/keychain.go, and consistent hardening even though
-// diagnose itself never runs privileged.
-const (
-	routeBin    = "/sbin/route"
-	ifconfigBin = "/sbin/ifconfig"
-	scutilBin   = "/usr/sbin/scutil"
-	pingBin     = "/sbin/ping"
+	"vpn/internal/sysbin"
 )
 
 // Stage names used to report where a probe stopped succeeding — kept as
@@ -123,7 +115,7 @@ func mtuFailure(probes []MTUProbe) bool {
 func probeNetwork() Network {
 	n := Network{}
 
-	if out, err := exec.Command(routeBin, "-n", "get", "default").Output(); err == nil {
+	if out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output(); err == nil {
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
 			switch {
@@ -136,7 +128,7 @@ func probeNetwork() Network {
 	}
 
 	if n.Interface != "" {
-		if out, err := exec.Command(ifconfigBin, n.Interface).Output(); err == nil {
+		if out, err := exec.Command(sysbin.Ifconfig, n.Interface).Output(); err == nil {
 			for _, line := range strings.Split(string(out), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "inet ") {
@@ -159,7 +151,7 @@ func probeNetwork() Network {
 		}
 	}
 
-	if out, err := exec.Command(scutilBin, "--dns").Output(); err == nil {
+	if out, err := exec.Command(sysbin.Scutil, "--dns").Output(); err == nil {
 		seen := map[string]bool{}
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
@@ -180,7 +172,7 @@ func probeNetwork() Network {
 }
 
 func pingRTT(ip string) (float64, error) {
-	out, err := exec.Command(pingBin, "-c", "2", "-t", "3", ip).Output()
+	out, err := exec.Command(sysbin.Ping, "-c", "2", "-t", "3", ip).Output()
 	if err != nil {
 		return 0, err
 	}
@@ -239,7 +231,7 @@ func probeMTU(ip string) []MTUProbe {
 		if payload < 0 {
 			payload = 0
 		}
-		cmd := exec.Command(pingBin, "-c", "1", "-t", "2", "-D", "-s", strconv.Itoa(payload), ip)
+		cmd := exec.Command(sysbin.Ping, "-c", "1", "-t", "2", "-D", "-s", strconv.Itoa(payload), ip)
 		err := cmd.Run()
 		results = append(results, MTUProbe{Size: size, OK: err == nil})
 	}

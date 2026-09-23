@@ -1,38 +1,49 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # TMS VPN Complete Uninstaller Script
-# Removes CLI engine, Menu Bar App, Background Daemons, and Configurations
+# Removes CLI engine, Menu Bar App, runtime state, configuration and the
+# PSK/password entries in Keychain.
+#
+# CLI-side cleanup is delegated to `vpn uninstall -y` — the one place that
+# knows every file it owns, disconnects gracefully (restoring routes/DNS
+# and ending the PPP session) and deletes the Keychain secrets. Run this as
+# the user who installed vpn, not with sudo: the Keychain and ~/.config/vpn
+# belong to that user; the CLI raises privilege itself where needed.
 # ==============================================================================
 
 set -euo pipefail
+
+CLI="/usr/local/bin/vpn"
+APP_DIR="/Applications/TMS VPN.app"
+
+if [ "$(id -u)" = 0 ]; then
+  echo "Run this as your normal user (it will ask for sudo only if needed)." >&2
+  exit 1
+fi
 
 echo "=================================================="
 echo "🗑️  UNINSTALLING TMS VPN (CLI & MENU BAR APP)"
 echo "=================================================="
 
-# 1. Stop any running processes
-echo "⏹️ [1/4] Stopping running VPN processes & Menu Bar UI..."
+echo "⏹️ [1/3] Quitting Menu Bar UI..."
 killall "TMS VPN" 2>/dev/null || true
-sudo killall -9 vpn 2>/dev/null || true
-sudo /usr/local/bin/vpn disconnect 2>/dev/null || true
-sudo /usr/local/bin/vpn repair 2>/dev/null || true
 
-# 2. Remove Application & Binaries
-echo "📂 [2/4] Removing Application bundle & CLI binaries..."
-sudo rm -rf "/Applications/TMS VPN.app"
-sudo rm -f "/usr/local/bin/vpn"
+echo "📂 [2/3] Removing CLI engine, state, log, profiles and Keychain secrets..."
+if [ -x "$CLI" ] && "$CLI" uninstall -y; then
+  :
+else
+  # The CLI is missing or unusable: remove its files by hand. Keychain
+  # entries (service names vpn.psk.* / vpn.pwd.*) cannot be enumerated
+  # reliably from here — delete them in Keychain Access if any remain.
+  echo "⚠️  vpn uninstall unavailable — removing files directly."
+  sudo rm -f "$CLI" /etc/vpn-owner-uid /var/log/vpn.log /var/log/vpn.log.1
+  sudo rm -rf /var/run/vpn
+  rm -rf "$HOME/.config/vpn"
+fi
+
+echo "🎨 [3/3] Removing Menu Bar app..."
+rm -rf "$APP_DIR" 2>/dev/null || sudo rm -rf "$APP_DIR"
 sudo rm -f "/usr/local/bin/tms-vpn-bar"
-sudo rm -f "/etc/vpn-owner-uid"
-
-# 3. Clean runtime log and temporary state
-echo "🧹 [3/4] Cleaning system log files and runtime state..."
-sudo rm -f "/var/log/vpn.log"
-sudo rm -f "/var/run/vpn.pid" 2>/dev/null || true
-sudo rm -f "/var/run/vpn.state" 2>/dev/null || true
-
-# 4. Optional: remove user configuration & profiles
-echo "⚙️ [4/4] Removing user configs (~/.config/vpn)..."
-rm -rf "$HOME/.config/vpn"
 
 echo "=================================================="
 echo "✅ TMS VPN has been completely uninstalled!"
