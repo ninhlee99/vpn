@@ -1369,6 +1369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        installEditMenu()
         statusItem = NSStatusBar.system.statusItem(withLength: 28)
         
         // Host the live SwiftUI MacOSMenuBar component (with 2.0s linear rotation & pulse)
@@ -1387,6 +1388,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 370, height: 440)
         popover.behavior = .transient
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
+    }
+
+    // A menu-bar-only (accessory) app never shows this in the UI — there's
+    // no menu bar to show it in — but AppKit still needs a real Edit menu
+    // with the standard cut:/copy:/paste:/selectAll: selectors and their
+    // ⌘X/⌘C/⌘V/⌘A key equivalents to route those shortcuts (and enable
+    // "Paste" in a text field's right-click menu) at all. Without this,
+    // NSApp.mainMenu is nil and every text field in the Add/Edit sheets
+    // can be typed into but never pasted into.
+    private func installEditMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+        appMenu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+        editMenu.addItem(NSMenuItem(title: "Undo", action: Selector(("undo:")), keyEquivalent: "z"))
+        let redo = NSMenuItem(title: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(NSMenuItem(title: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x"))
+        editMenu.addItem(NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c"))
+        editMenu.addItem(NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"))
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+
+        NSApp.mainMenu = mainMenu
     }
 
     @objc func togglePopover(_ sender: AnyObject?) {
