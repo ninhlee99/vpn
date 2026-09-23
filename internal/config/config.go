@@ -77,7 +77,7 @@ func filePath() (string, error) {
 }
 
 // Load reads the config file, returning an empty Config if it does not exist
-// yet (first run — see `vpn init`).
+// yet (first run — nothing has been added via `vpn profile add`).
 func Load() (*Config, error) {
 	path, err := filePath()
 	if err != nil {
@@ -132,7 +132,7 @@ func (c *Config) Profile(name string) (string, *Profile, error) {
 		name = c.ActiveProfile
 	}
 	if name == "" {
-		return "", nil, fmt.Errorf("no VPN profile selected — run `vpn init` or pass --server")
+		return "", nil, fmt.Errorf("no VPN profile selected — add one in the TMS VPN menu bar app or pass --profile")
 	}
 	p, ok := c.Profiles[name]
 	if !ok {

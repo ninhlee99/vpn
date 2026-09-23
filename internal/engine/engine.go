@@ -5,11 +5,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -46,6 +48,12 @@ type Config struct {
 	Verbose      bool
 }
 
+// errAbortedByDisconnect is Connect's internal sentinel for "a `disconnect`
+// arrived while still negotiating and this process cancelled itself in
+// response" — not a real connection failure, so it must never surface as a
+// FAILED state/alert to the UI.
+var errAbortedByDisconnect = errors.New("connect aborted: disconnected while negotiating")
+
 // Connect runs the full stage sequence and, on success, leaves the tunnel
 // interface up, routes/DNS applied, and state.Save()'d as CONNECTED. On any
 // failure, it restores whatever it had already changed before returning —
@@ -66,6 +74,14 @@ func Connect(cfg Config) error {
 		cfg.Timeout = 30 * time.Second
 	}
 
+	// Registered before anything else — including before the PID that lets
+	// `disconnect` find this process at all — and reused for the entire
+	// call (setup negotiation *and* the data-plane phase below) instead of
+	// two separate signal.NotifyContexts, so there is exactly one place
+	// that decides whether a termination was requested.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server}
 
 	var rtSnapshot *routing.Snapshot
@@ -84,9 +100,30 @@ func Connect(cfg Config) error {
 		if err := vpnlog.Init(cfg.Verbose); err != nil {
 			return fmt.Errorf("open log file: %w", err)
 		}
+		// Record PID together with the very first save, not only once
+		// CONNECTED (as before) — otherwise a `disconnect` issued while
+		// this process is still negotiating IKE/L2TP/PPP finds state.PID
+		// still zero, can't signal this process, and just clears the state
+		// file locally while this process keeps running and authenticating
+		// in the background. A `connect` started right after then races
+		// that orphan for the same account, which is what intermittently
+		// produced spurious PPP auth failures / stale "already logged in"
+		// sessions, and later state-file flicker, on rapid on/off/on
+		// toggling: the orphan can finish and overwrite state.json to
+		// CONNECTED well after the UI already believes it disconnected.
+		st.PID = os.Getpid()
 		_ = st.Save()
 
 		fail := func(stage, detail string, err error) error {
+			if sigCtx.Err() != nil {
+				// Cancelled by our own signal handler above, not a real
+				// failure — whatever was captured/applied so far has
+				// already been restored at each call site below, exactly
+				// like any other failure path.
+				_ = state.Clear()
+				vpnlog.Info("ENGINE", "connect aborted by disconnect", vpnlog.Fields{"stage": stage})
+				return errAbortedByDisconnect
+			}
 			st.Phase = state.PhaseFailed
 			st.FailStage = stage
 			st.FailDetail = detail
@@ -114,7 +151,7 @@ func Connect(cfg Config) error {
 			return fail("ROUTE_FAILURE", "determine local outbound IP", fmt.Errorf("no IPv4 on %s", rtSnapshot.DefaultInterface))
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+		ctx, cancel := context.WithTimeout(sigCtx, cfg.Timeout)
 		defer cancel()
 
 		sess, err := ike.EstablishPhase1(ctx, ike.Config{
@@ -238,7 +275,7 @@ func Connect(cfg Config) error {
 		}
 
 		st.Phase = state.PhaseConnected
-		st.PID = os.Getpid()
+		// st.PID was already recorded at the top of this closure.
 		st.TunDevice = dev.Name
 		st.LocalIP = ipcp.LocalIP.String()
 		st.SavedRoutes = true
@@ -249,20 +286,23 @@ func Connect(cfg Config) error {
 		return nil
 	})
 	if setupErr != nil {
+		if errors.Is(setupErr, errAbortedByDisconnect) {
+			// A deliberate, in-flight disconnect — already cleaned up and
+			// cleared inside fail() above; report success to the caller
+			// (the CLI's own `disconnect` is what's waiting on this).
+			return nil
+		}
 		return setupErr
 	}
 	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name})
-
-	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	// macOS can silently reap the routes ProtectServer/ApplyFullTunnel just
 	// installed at any point during a long-lived session (see routing.go's
 	// Watch doc comment) — re-assert them periodically instead of trusting
 	// they stay in place for the whole connection.
-	go rtSnapshot.Watch(runCtx, privilege.Elevate, 10*time.Second)
+	go rtSnapshot.Watch(sigCtx, privilege.Elevate, 10*time.Second)
 
-	pumpErr := runDataPlane(runCtx, dev, pppT)
+	pumpErr := runDataPlane(sigCtx, dev, pppT)
 
 	// Tear down on the way out no matter why the pump stopped (signal or
 	// error) — the disconnect/repair CLI paths exist for when this process
@@ -277,7 +317,7 @@ func Connect(cfg Config) error {
 		_ = rtSnapshot.Restore()
 		_ = state.Clear()
 
-		if pumpErr != nil && runCtx.Err() == nil {
+		if pumpErr != nil && sigCtx.Err() == nil {
 			// Stopped for a reason other than the signal we were waiting for.
 			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr})
 			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
@@ -404,6 +444,51 @@ func localHostName() (string, error) {
 	return "l2tp-cli", nil
 }
 
+// connectLockPath is an flock'd file that serializes connect/disconnect's
+// session-transition critical sections *across processes* — `connect` and
+// `disconnect` are always separate OS processes (privilege.Elevate's own
+// mutex only serializes goroutines within one process), so without this,
+// a `disconnect` invoked right after a `connect` could run concurrently
+// with that connect's own fork-and-record-PID step and simply find
+// nothing yet to kill (see ClaimNewConnect's doc comment).
+func connectLockPath() string { return filepath.Join(state.Dir, "connect.lock") }
+
+// WithConnectLock runs fn with the cross-process connect lock held. Held
+// only around the *transition* (deciding what's currently running, and
+// killing/claiming it) — never around an entire connection attempt, so a
+// disconnect can still promptly interrupt a slow negotiation once that
+// negotiation's own claim has been recorded and this lock released.
+func WithConnectLock(fn func() error) error {
+	f, err := openLockFile()
+	if err != nil {
+		return fmt.Errorf("open connect lock: %w", err)
+	}
+	defer f.Close()
+	// flock, not privilege.Elevate's mutex: this needs to serialize across
+	// separate `vpn` processes, which an in-process mutex cannot do. Once
+	// open, flock/close need no privilege regardless of who opened the fd
+	// (permissions are only checked at open(2) — same reasoning as
+	// vpnlog.Init's comment).
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquire connect lock: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return fn()
+}
+
+func openLockFile() (*os.File, error) {
+	var f *os.File
+	err := privilege.Elevate(func() error {
+		if err := os.MkdirAll(state.Dir, 0o755); err != nil {
+			return err
+		}
+		var err error
+		f, err = os.OpenFile(connectLockPath(), os.O_CREATE|os.O_RDWR, 0o644)
+		return err
+	})
+	return f, err
+}
+
 // Disconnect tears down a running connection. `connect` runs in the
 // foreground (or daemonized) for as long as the tunnel is up — see its
 // runDataPlane loop — so the normal path here is to signal that live
@@ -412,12 +497,65 @@ func localHostName() (string, error) {
 // would. Only if that process is gone (crashed, killed -9) does this fall
 // back to redoing the restore itself from what was last recorded on disk.
 func Disconnect() error {
+	return WithConnectLock(func() error { return killExisting(true) })
+}
+
+// PrepareNewConnect tears down any previous connect/connected session
+// before a new one starts. `connect` calls this itself while holding
+// WithConnectLock (see cli.cmdConnect), before forking its daemon, so two
+// negotiation attempts for the same account can never run concurrently.
+// That used to be the caller's job (the menu bar app ran its own
+// `disconnect` immediately before every `connect`, followed by an
+// unconditional `pkill -9` as a blanket safety net); doing it here
+// instead, synchronously and under the same lock the new daemon's PID
+// gets claimed under, closes two gaps that approach had: a caller could
+// race this process's own state.json write on a very fast reconnect, and
+// SIGKILL bypassed graceful cancellation even for a process that would
+// have responded to SIGTERM within milliseconds — which could catch it
+// mid-PPP-authentication and leave a session the server still considers
+// logged in, exactly what produced the intermittent "already logged in" /
+// CHAP-rejected failures on rapid on/off/on toggling. Silent when there is
+// nothing to tear down. Callers must already hold WithConnectLock.
+func PrepareNewConnect() error {
+	return killExisting(false)
+}
+
+// ClaimNewConnect blocks (briefly) until state.json shows childPID as a
+// live CONNECTING session — i.e. the just-forked daemon has recorded
+// itself — so the caller can safely release WithConnectLock knowing a
+// disconnect issued right after this returns will always find and signal
+// it. Without this confirmation, releasing the lock immediately after
+// forking would reopen the exact race this lock exists to close: a
+// disconnect could run in the gap between the fork and the child actually
+// writing its PID, see nothing to kill, and leave the child running
+// unnoticed. Callers must already hold WithConnectLock.
+func ClaimNewConnect(childPID int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		st, err := state.Load()
+		if err == nil && st.Phase == state.PhaseConnecting && st.PID == childPID {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("connect process (pid %d) did not report itself within %s", childPID, timeout)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// killExisting is disconnect/PrepareNewConnect's shared implementation.
+// verbose controls the user-facing progress prints — off when `connect`
+// calls this on its own behalf, so it doesn't narrate a disconnect the
+// user never asked for. Callers must already hold WithConnectLock.
+func killExisting(verbose bool) error {
 	st, err := state.Load()
 	if err != nil {
 		return err
 	}
 	if st.Phase != state.PhaseConnected && st.Phase != state.PhaseConnecting {
-		fmt.Println("Already disconnected.")
+		if verbose {
+			fmt.Println("Already disconnected.")
+		}
 		return nil
 	}
 	return privilege.Elevate(func() error {
@@ -425,16 +563,30 @@ func Disconnect() error {
 			if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil {
 				return fmt.Errorf("signal running connect process (pid %d): %w", st.PID, err)
 			}
-			for i := 0; i < 50; i++ { // up to ~5s for its own teardown to finish
+			for i := 0; i < 50; i++ { // up to ~5s for its own graceful teardown
 				time.Sleep(100 * time.Millisecond)
 				cur, err := state.Load()
 				if err == nil && cur.Phase == state.PhaseDisconnected {
-					fmt.Println("Disconnected.")
+					if verbose {
+						fmt.Println("Disconnected.")
+					}
 					return nil
 				}
 			}
-			fmt.Println("Sent disconnect signal; still tearing down — check `vpn status`.")
-			return nil
+			// Unresponsive to SIGTERM for a full 5s — genuinely wedged,
+			// not merely mid-negotiation (Connect's signal handler reacts
+			// to SIGTERM within a retry-loop tick, well under this).
+			// Escalate to SIGKILL of this exact PID — never a wildcard
+			// process-name match — so a stuck connection can still always
+			// be cleared without any risk of hitting an unrelated process
+			// that happens to share `vpn connect` in its command line.
+			vpnlog.Error("ENGINE", "connect process unresponsive to SIGTERM, escalating to SIGKILL", vpnlog.Fields{"pid": st.PID})
+			_ = syscall.Kill(st.PID, syscall.SIGKILL)
+			restoreRecorded(st)
+			if verbose {
+				fmt.Println("Force-terminated an unresponsive connection.")
+			}
+			return state.Clear()
 		}
 		// No live process to signal — restore from what was last recorded.
 		restoreRecorded(st)
