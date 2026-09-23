@@ -10,6 +10,7 @@ import {
   X
 } from 'lucide-react';
 import { VPNProfile, ConnectionState, AppSettings } from '../types';
+import { TracingBorder } from './TracingBorder';
 
 export type PopoverViewMode = 'list' | 'add' | 'edit';
 
@@ -445,25 +446,25 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <div className="flex items-center gap-3">
               {/* Shield Badge */}
               <div
-                className={`relative w-11 h-11 rounded-[14px] flex items-center justify-center transition-all duration-300 ${
+                className={`relative w-11 h-11 rounded-[14px] border flex items-center justify-center transition-[background-color,border-color,box-shadow] duration-300 ${
                   connectionState === 'connecting' || connectionState === 'reconnecting'
-                    ? 'overflow-hidden p-[2px] shadow-[0_0_20px_rgba(245,158,11,0.5)]'
+                    ? 'border-amber-500/40 bg-[#241306] shadow-[0_0_20px_rgba(245,158,11,0.5)]'
                     : connectionState === 'connected'
-                    ? 'border-2 border-emerald-400 bg-emerald-950/60 shadow-[0_0_18px_rgba(52,211,153,0.5)] animate-pulse'
-                    : 'bg-gradient-to-br from-[#0c2e3a] to-[#061922] border border-[#196b7d]/70 shadow-[0_0_16px_rgba(20,184,210,0.35)]'
+                    ? 'border-emerald-400 bg-emerald-950/60 shadow-[0_0_0_1px_rgba(52,211,153,0.9),0_0_18px_rgba(52,211,153,0.5)]'
+                    : 'border-[#196b7d]/70 bg-[#0a2530] shadow-[0_0_16px_rgba(20,184,210,0.35)]'
                 }`}
               >
                 {(connectionState === 'connecting' || connectionState === 'reconnecting') && (
-                  <>
-                    <div className="absolute -inset-[150%] animate-spin-slow bg-[conic-gradient(from_0deg,transparent_0_260deg,#f59e0b_310deg,#fbbf24_360deg)]" />
-                    <div className="absolute inset-[2px] rounded-[12px] bg-[#241306]/95 z-0" />
-                  </>
+                  <TracingBorder tone="amber" radius={14} period={1.8} strokeWidth={2} tail={0.35} />
+                )}
+                {connectionState === 'connected' && (
+                  <TracingBorder tone="green" radius={14} period={3.6} strokeWidth={2} tail={0.22} />
                 )}
                 <div className="relative z-10 flex items-center justify-center">
                   <Shield
                     className={`w-5 h-5 stroke-[2.2] transition-colors duration-300 ${
                       connectionState === 'connecting' || connectionState === 'reconnecting'
-                        ? 'text-amber-400 fill-amber-400/25 animate-pulse'
+                        ? 'text-amber-400 fill-amber-400/25'
                         : connectionState === 'connected'
                         ? 'text-emerald-400 fill-emerald-400/30'
                         : 'text-[#22d3ee] fill-[#22d3ee]/20'
@@ -540,36 +541,27 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                   key={profile.id}
                   id={`profile-card-${profile.id}`}
                   onClick={() => onToggleProfile(profile)}
-                  className={`relative rounded-[14px] transition-all duration-200 cursor-pointer ${
+                  className={`relative rounded-[14px] border transition-[background-color,border-color,box-shadow] duration-300 ease-out cursor-pointer ${
                     isMenuOpen ? 'z-40' : 'z-10'
                   } ${
                     isReconnecting
-                      ? 'shadow-[0_0_22px_rgba(239,68,68,0.45)] border border-red-500/80'
+                      ? 'bg-[#220a10] shadow-[0_0_22px_rgba(239,68,68,0.45)] border-red-500/50'
                       : isConnecting
-                      ? 'shadow-[0_0_22px_rgba(245,158,11,0.45)] border border-amber-500/80'
+                      ? 'bg-[#241306] shadow-[0_0_22px_rgba(245,158,11,0.45)] border-amber-500/50'
                       : isConnected
-                      ? 'shadow-[0_0_22px_rgba(16,185,129,0.45)] border border-[#10b981]/80'
-                      : 'bg-[#181f2b]/70 border border-white/[0.08] hover:border-white/20 hover:bg-[#181f2b]'
+                      ? 'bg-[#06241a] shadow-[0_0_22px_rgba(16,185,129,0.45)] border-[#10b981]/70'
+                      : 'bg-[#181f2b]/70 border-white/[0.08] hover:border-white/20 hover:bg-[#181f2b]'
                   }`}
                 >
-                  {/* Animated Rotating Linear Light Border on Connecting (Orange), Active (Green), or Reconnecting (Red) State */}
+                  {/* Light tracing the border: amber while connecting, red while reconnecting, slow green once connected */}
                   {(isConnected || isConnecting || isReconnecting) && (
-                    <div className="absolute inset-0 rounded-[14px] pointer-events-none overflow-hidden z-0">
-                      <div
-                        className={`absolute -inset-[150%] animate-spin-slow ${
-                          isReconnecting
-                            ? 'bg-[conic-gradient(from_0deg,transparent_0_300deg,#ef4444_330deg,#fca5a5_360deg)]'
-                            : isConnecting
-                            ? 'bg-[conic-gradient(from_0deg,transparent_0_300deg,#f59e0b_330deg,#fde68a_360deg)]'
-                            : 'bg-[conic-gradient(from_0deg,transparent_0_300deg,#10b981_330deg,#6ee7b7_360deg)]'
-                        }`}
-                      />
-                      <div
-                        className={`absolute inset-[1.5px] rounded-[13px] ${
-                          isReconnecting ? 'bg-[#220a10]/95' : isConnecting ? 'bg-[#241306]/95' : 'bg-[#06241a]/95'
-                        }`}
-                      />
-                    </div>
+                    <TracingBorder
+                      key={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
+                      tone={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
+                      radius={14}
+                      period={isConnected && !isConnecting && !isReconnecting ? 3.6 : 1.8}
+                      tail={isConnected && !isConnecting && !isReconnecting ? 0.22 : 0.35}
+                    />
                   )}
 
                   {/* Card Inner Content */}
@@ -595,7 +587,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
                       <div className="min-w-0">
                         <div
-                          className={`text-[14px] font-medium tracking-tight truncate ${
+                          className={`text-[14px] font-medium tracking-tight truncate transition-colors duration-300 ${
                             isReconnecting
                               ? 'text-[#fecaca]'
                               : isConnecting
@@ -608,17 +600,17 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                           {profile.name}
                         </div>
                         {isReconnecting ? (
-                          <div className="text-[11px] text-red-300 font-medium tracking-tight flex items-center gap-1 mt-0.5">
+                          <div className="text-[11px] text-red-300 font-medium tracking-tight flex items-center gap-1 mt-0.5 fade-in-soft">
                             <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
                             <span>Đang thử kết nối lại...</span>
                           </div>
                         ) : isConnecting ? (
-                          <div className="text-[11px] text-amber-300 font-medium tracking-tight flex items-center gap-1 mt-0.5">
+                          <div className="text-[11px] text-amber-300 font-medium tracking-tight flex items-center gap-1 mt-0.5 fade-in-soft">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
                             <span>Đang kết nối đến máy chủ...</span>
                           </div>
                         ) : (
-                          <div className="text-[11px] text-slate-400 truncate mt-0.5">
+                          <div className="text-[11px] text-slate-400 truncate mt-0.5 fade-in-soft">
                             {profile.serverAddress}
                           </div>
                         )}
@@ -632,7 +624,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                         type="button"
                         id={`toggle-switch-${profile.id}`}
                         onClick={() => onToggleProfile(profile)}
-                        className={`relative inline-flex h-[24px] w-[44px] items-center rounded-full transition-colors duration-200 focus:outline-none ${
+                        className={`relative inline-flex h-[24px] w-[44px] items-center rounded-full transition-[background-color,box-shadow] duration-300 focus:outline-none ${
                           isReconnecting
                             ? 'bg-[#ef4444] shadow-[0_0_12px_rgba(239,68,68,0.5)]'
                             : isConnecting
@@ -643,7 +635,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                         }`}
                       >
                         <span
-                          className={`inline-block h-[18px] w-[18px] transform rounded-full bg-white transition-transform duration-200 shadow-md ${
+                          className={`inline-block h-[18px] w-[18px] transform rounded-full bg-white transition-transform duration-300 ease-spring shadow-md will-change-transform ${
                             isConnected || isConnecting || isReconnecting ? 'translate-x-[22px]' : 'translate-x-[3px]'
                           }`}
                         />

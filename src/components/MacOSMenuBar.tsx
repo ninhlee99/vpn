@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Wifi, Battery, Search, Sliders, Shield, ShieldCheck, ShieldAlert, Settings, Plus, LogOut, Info, ShieldQuestion } from 'lucide-react';
 import { ConnectionState } from '../types';
+import { TracingBorder } from './TracingBorder';
 
 interface MacOSMenuBarProps {
   isPopoverOpen: boolean;
@@ -52,31 +53,25 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
     switch (connectionState) {
       case 'connected':
         return (
-          <div className="relative p-1 rounded-lg border border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] animate-pulse bg-emerald-950/50 flex items-center justify-center">
+          <div className="relative p-1 rounded-lg border border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] bg-emerald-950/50 flex items-center justify-center">
             <ShieldCheck className="w-[15px] h-[15px] text-emerald-400 fill-emerald-400/30 filter drop-shadow-[0_0_4px_rgba(52,211,153,0.6)]" />
             <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
           </div>
         );
       case 'connecting':
         return (
-          <div className="relative p-[1.5px] rounded-lg overflow-hidden flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
-            {/* Orange linear border with animate-spin-slow */}
-            <div className="absolute -inset-[150%] animate-spin-slow bg-[conic-gradient(from_0deg,transparent_0_260deg,#f59e0b_310deg,#fbbf24_360deg)]" />
-            <div className="relative rounded-[6px] bg-[#161a22] p-1 flex items-center justify-center">
-              <Shield className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30 animate-pulse" />
-              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24]" />
-            </div>
+          <div className="relative p-1 rounded-lg border border-amber-500/40 bg-[#161a22] flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
+            <TracingBorder tone="amber" radius={8} period={1.6} strokeWidth={1.5} tail={0.45} />
+            <Shield className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-400 shadow-[0_0_6px_#fbbf24]" />
           </div>
         );
       case 'reconnecting':
         return (
-          <div className="relative p-[1.5px] rounded-lg overflow-hidden flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
-            {/* Orange linear border with animate-spin-slow */}
-            <div className="absolute -inset-[150%] animate-spin-slow bg-[conic-gradient(from_0deg,transparent_0_260deg,#f59e0b_310deg,#fbbf24_360deg)]" />
-            <div className="relative rounded-[6px] bg-[#161a22] p-1 flex items-center justify-center">
-              <ShieldAlert className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30 animate-pulse" />
-              <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500 shadow-[0_0_6px_#f59e0b]" />
-            </div>
+          <div className="relative p-1 rounded-lg border border-amber-500/40 bg-[#161a22] flex items-center justify-center shadow-[0_0_10px_rgba(245,158,11,0.4)]">
+            <TracingBorder tone="amber" radius={8} period={1.6} strokeWidth={1.5} tail={0.45} />
+            <ShieldAlert className="w-[15px] h-[15px] text-amber-400 fill-amber-400/30" />
+            <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-amber-500 shadow-[0_0_6px_#f59e0b]" />
           </div>
         );
       case 'error':

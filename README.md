@@ -21,11 +21,14 @@ Cả 3 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần
 
 ## Setup lần đầu
 
-```bash
-vpn init
-```
+Mở app **TMS-VPN** trên menu bar → **+ Thêm điểm nối**, nhập server, tài khoản, mật khẩu, PSK. App gọi CLI để lưu, PSK/password nằm trong Keychain.
 
-CLI sẽ hỏi server, username, PSK, password rồi tự lưu vào Keychain.
+Hoặc từ terminal:
+
+```bash
+vpn profile add <tên> --server <host>       # hỏi PSK nếu không truyền --psk
+vpn account add <tên> <username> --default  # hỏi password nếu không truyền --password
+```
 
 ## Dùng hằng ngày
 
@@ -48,17 +51,15 @@ UDP/500, đổi route/DNS) rồi hạ ngay sau đó — không giữ quyền roo
 kết nối. **Chỉ đúng user đã cài mới gọi được `vpn`** — user khác trên máy chạy
 lệnh này sẽ bị từ chối ngay lập tức, kể cả các lệnh không cần quyền root.
 
-## Nhiều server / nhiều account
+## Nhiều server
 
 ```bash
 vpn profile add <tên> --server <host>       # thêm server khác
-vpn profile use <tên>                       # chuyển server đang dùng
-vpn profile rename <tên cũ> <tên mới>       # đổi tên profile (PSK/password trong Keychain tự chuyển theo)
-vpn account add <profile> <username>        # thêm account cho 1 server
-vpn account use <profile> <username>        # chuyển account đang dùng
+vpn profile remove <tên>                    # xoá profile (kèm PSK/password trong Keychain)
+vpn connect --profile <tên>                 # kết nối vào profile cụ thể
 ```
 
-Không truyền `--profile`/`--account` cho `connect` thì CLI tự dùng cái đang được `use`.
+Chọn server, bật/tắt kết nối và sửa hồ sơ hằng ngày thì dùng app TMS-VPN trên menu bar.
 
 ## Sự cố
 

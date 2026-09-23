@@ -82,6 +82,7 @@ struct CLIState: Codable {
     var local_ip: String?
     var fail_stage: String?
     var fail_detail: String?
+    var updated_at: String?
 }
 
 struct VPNProfileItem: Identifiable, Hashable {
@@ -111,52 +112,6 @@ struct VPNAlertInfo: Equatable {
     var detail: String
 }
 
-// MARK: - Status Bar Icon Generator
-
-func makeMenuBarIcon(phase: String) -> NSImage {
-    let size = NSSize(width: 18, height: 18)
-    let img = NSImage(size: size, flipped: false) { rect in
-        if phase == "CONNECTED" {
-            // Vibrant Green / Emerald Shield with active badge
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
-            if let shield = NSImage(systemSymbolName: "checkmark.shield.fill", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
-                NSColor(red: 0.15, green: 0.9, blue: 0.55, alpha: 1.0).set()
-                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
-            }
-            let badgeRect = NSRect(x: 12, y: 11, width: 5, height: 5)
-            let badgePath = NSBezierPath(ovalIn: badgeRect)
-            NSColor(red: 0.2, green: 0.98, blue: 0.65, alpha: 1.0).setFill()
-            badgePath.fill()
-            NSColor(red: 0.05, green: 0.3, blue: 0.15, alpha: 0.8).setStroke()
-            badgePath.lineWidth = 0.5
-            badgePath.stroke()
-        } else if phase == "CONNECTING" {
-            // Orange / Yellow Connecting Shield
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-            if let shield = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
-                NSColor(red: 0.98, green: 0.7, blue: 0.15, alpha: 1.0).set()
-                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
-            }
-            let badgeRect = NSRect(x: 12, y: 11, width: 5, height: 5)
-            let badgePath = NSBezierPath(ovalIn: badgeRect)
-            NSColor.systemOrange.setFill()
-            badgePath.fill()
-        } else {
-            // Clean Disconnected Shield
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-            if let shield = NSImage(systemSymbolName: "shield", accessibilityDescription: nil)?.withSymbolConfiguration(config) {
-                NSColor.labelColor.withAlphaComponent(0.85).set()
-                shield.draw(in: NSRect(x: 1, y: 1, width: 15, height: 15))
-            }
-        }
-        return true
-    }
-    
-    // When connected or connecting, keep isTemplate = false so macOS preserves vivid RGB green/orange!
-    img.isTemplate = (phase == "DISCONNECTED")
-    return img
-}
-
 // MARK: - VPN Manager (Real CLI & File Sync)
 
 @MainActor
@@ -175,13 +130,28 @@ final class VPNManager: ObservableObject {
     @Published var isStaleSession: Bool = false
     @Published var autoRetryCountdown: Int = 0
 
-    // Settings
-    @Published var autoConnectOnLaunch: Bool = false
-    @Published var startAtLogin: Bool = true
-
     var onStatusChanged: ((String) -> Void)?
     private var pollTimer: Timer?
     private var retryTimer: Timer?
+
+    /// The phase the user just asked for, shown optimistically until the CLI's state file
+    /// agrees. Without it the 1s poll read the not-yet-updated state.json and flipped the
+    /// switch back for a tick (ON → OFF → ON), which is what looked like jank.
+    private struct PendingIntent {
+        var id: Int
+        var phase: String
+        var profile: String?
+        var since: Date
+        var timeout: TimeInterval
+    }
+    private var pendingIntent: PendingIntent?
+    private var intentCounter = 0
+
+    var linkState: LinkState {
+        isConnecting ? .connecting : (isConnected ? .connected : .idle)
+    }
+
+    private let cli = "/usr/local/bin/vpn"
 
     private var configURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -210,12 +180,32 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    /// @Published fires objectWillChange on every assignment, even of an equal value, so
+    /// the 1s poll used to re-render the whole popover every second. Only write on change.
+    private func update<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<VPNManager, T>, _ value: T) {
+        if self[keyPath: keyPath] != value {
+            self[keyPath: keyPath] = value
+        }
+    }
+
+    private static func parseDate(_ s: String?) -> Date? {
+        guard let s = s else { return nil }
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f.date(from: s) { return d }
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: s)
+    }
+
     func syncFromDisk() {
         // 1. Read State (/var/run/vpn/state.json)
         var activeProf: String?
         var phase = "DISCONNECTED"
         var localIP = ""
         var tunDev = ""
+        var failStage = ""
+        var failDetail = ""
+        var updatedAt: Date?
 
         if let stateData = try? Data(contentsOf: stateURL),
            let st = try? JSONDecoder().decode(CLIState.self, from: stateData) {
@@ -223,117 +213,128 @@ final class VPNManager: ObservableObject {
             activeProf = st.profile
             localIP = st.local_ip ?? ""
             tunDev = st.tun_device ?? ""
-            if phase == "FAILED" {
-                let stage = st.fail_stage ?? ""
-                let detail = st.fail_detail ?? ""
-                
-                if detail.contains("already logged in") || detail.contains("You are already logged in") {
-                    self.activeAlert = VPNAlertInfo(
-                        kind: .sessionStale,
-                        title: "Session Stale",
-                        message: "Tài khoản đang có phiên đăng nhập trên máy chủ ('Already logged in').",
-                        detail: detail
-                    )
-                    self.errorMessage = "Session Stale: Tài khoản đang có phiên đăng nhập trên server."
-                    self.isStaleSession = true
-                    if self.autoRetryCountdown == 0 && self.retryTimer == nil && self.activeProfileName != nil {
-                        self.startAutoRetry(profileName: self.activeProfileName!)
-                    }
-                } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
-                    self.activeAlert = VPNAlertInfo(
-                        kind: .authFailed,
-                        title: "Authentication Failed",
-                        message: "Xác thực PPP/CHAP thất bại: Sai tên tài khoản hoặc mật khẩu.",
-                        detail: detail.isEmpty ? "CHAP authentication rejected by peer" : detail
-                    )
-                    self.errorMessage = "Authentication Failed: Sai tên tài khoản hoặc mật khẩu."
-                    self.isStaleSession = false
-                } else if stage == "IKE_FAILED" || stage.contains("IKE") {
-                    self.activeAlert = VPNAlertInfo(
-                        kind: .ikeFailed,
-                        title: "IKE Handshake Failed",
-                        message: "Lỗi bắt tay IPsec IKE: Sai địa chỉ IP máy chủ hoặc sai Pre-shared Key (PSK).",
-                        detail: detail
-                    )
-                    self.errorMessage = "IKE Handshake Failed: Sai IP máy chủ hoặc sai khóa PSK."
-                    self.isStaleSession = false
-                } else if stage == "ROUTE_FAILURE" {
-                    self.activeAlert = VPNAlertInfo(
-                        kind: .routeFailed,
-                        title: "Routing Error",
-                        message: "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair).",
-                        detail: detail
-                    )
-                    self.errorMessage = "Routing Error: Lỗi thiết lập định tuyến mạng."
-                    self.isStaleSession = false
-                } else {
-                    self.activeAlert = VPNAlertInfo(
-                        kind: .generic,
-                        title: stage.isEmpty ? "Lỗi kết nối" : stage,
-                        message: detail.isEmpty ? "Kết nối thất bại" : detail,
-                        detail: detail
-                    )
-                    self.errorMessage = "\(stage.isEmpty ? "Lỗi kết nối" : stage): \(detail)"
-                    self.isStaleSession = false
-                }
+            failStage = st.fail_stage ?? ""
+            failDetail = st.fail_detail ?? ""
+            updatedAt = Self.parseDate(st.updated_at)
+        }
+
+        if let intent = pendingIntent {
+            let confirmed: Bool
+            if intent.phase == "CONNECTING" {
+                // A FAILED left over from an earlier attempt must not count as the answer.
+                let freshFailure = phase == "FAILED" && (updatedAt.map { $0 >= intent.since.addingTimeInterval(-1) } ?? false)
+                confirmed = phase == "CONNECTING" || phase == "CONNECTED" || freshFailure
             } else {
-                if phase == "CONNECTED" || phase == "CONNECTING" {
-                    self.errorMessage = nil
-                    self.activeAlert = nil
-                    self.isStaleSession = false
-                    self.cancelAutoRetry()
-                }
+                confirmed = phase == "DISCONNECTED"
+            }
+            if confirmed || Date().timeIntervalSince(intent.since) > intent.timeout {
+                pendingIntent = nil
+            } else {
+                phase = intent.phase
+                activeProf = intent.profile ?? activeProf
             }
         }
 
-        let oldPhase = self.currentPhase
-        self.currentPhase = phase
-        self.isConnected = (phase == "CONNECTED")
-        self.isConnecting = (phase == "CONNECTING")
-        self.currentIP = localIP
-        self.currentTunDevice = tunDev
+        if phase == "FAILED" {
+            applyFailure(stage: failStage, detail: failDetail)
+        } else if phase == "CONNECTED" || phase == "CONNECTING" {
+            update(\.errorMessage, nil)
+            update(\.activeAlert, nil)
+            update(\.isStaleSession, false)
+            cancelAutoRetry()
+        }
 
-        if oldPhase != phase || self.onStatusChanged != nil {
-            self.onStatusChanged?(phase)
+        let oldPhase = currentPhase
+        update(\.currentPhase, phase)
+        update(\.isConnected, phase == "CONNECTED")
+        update(\.isConnecting, phase == "CONNECTING")
+        update(\.currentIP, localIP)
+        update(\.currentTunDevice, tunDev)
+
+        if oldPhase != phase {
+            onStatusChanged?(phase)
         }
 
         // 2. Read Config (~/.config/vpn/config.json)
         if let configData = try? Data(contentsOf: configURL),
            let cfg = try? JSONDecoder().decode(CLIConfig.self, from: configData) {
-            
             if activeProf == nil {
                 activeProf = cfg.active_profile
             }
-            self.activeProfileName = activeProf
+            update(\.activeProfileName, activeProf)
 
             var items: [VPNProfileItem] = []
-            if let profDict = cfg.profiles {
-                for (pName, pVal) in profDict {
-                    let isConn = (self.isConnected && (activeProf == pName))
-                    let isConnIng = (self.isConnecting && (activeProf == pName))
-                    let user = pVal.default_account ?? pVal.accounts?.keys.first ?? ""
-                    items.append(VPNProfileItem(
-                        name: pName,
-                        server: pVal.server ?? "",
-                        username: user,
-                        isFullTunnel: pVal.full_tunnel ?? true,
-                        isConnected: isConn,
-                        isConnecting: isConnIng
-                    ))
-                }
+            for (pName, pVal) in cfg.profiles ?? [:] {
+                items.append(VPNProfileItem(
+                    name: pName,
+                    server: pVal.server ?? "",
+                    username: pVal.default_account ?? pVal.accounts?.keys.first ?? "",
+                    isFullTunnel: pVal.full_tunnel ?? true,
+                    isConnected: isConnected && activeProf == pName,
+                    isConnecting: isConnecting && activeProf == pName
+                ))
             }
-            self.profiles = items.sorted { $0.name.lowercased() < $1.name.lowercased() }
+            update(\.profiles, items.sorted { $0.name.lowercased() < $1.name.lowercased() })
+        }
+    }
+
+    private func applyFailure(stage: String, detail: String) {
+        let alert: VPNAlertInfo
+        let message: String
+        if detail.contains("already logged in") || detail.contains("You are already logged in") {
+            alert = VPNAlertInfo(
+                kind: .sessionStale,
+                title: "Session Stale",
+                message: "Tài khoản đang có phiên đăng nhập trên máy chủ ('Already logged in').",
+                detail: detail
+            )
+            message = "Session Stale: Tài khoản đang có phiên đăng nhập trên server."
+        } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
+            alert = VPNAlertInfo(
+                kind: .authFailed,
+                title: "Authentication Failed",
+                message: "Xác thực PPP/CHAP thất bại: Sai tên tài khoản hoặc mật khẩu.",
+                detail: detail.isEmpty ? "CHAP authentication rejected by peer" : detail
+            )
+            message = "Authentication Failed: Sai tên tài khoản hoặc mật khẩu."
+        } else if stage == "IKE_FAILED" || stage.contains("IKE") {
+            alert = VPNAlertInfo(
+                kind: .ikeFailed,
+                title: "IKE Handshake Failed",
+                message: "Lỗi bắt tay IPsec IKE: Sai địa chỉ IP máy chủ hoặc sai Pre-shared Key (PSK).",
+                detail: detail
+            )
+            message = "IKE Handshake Failed: Sai IP máy chủ hoặc sai khóa PSK."
+        } else if stage == "ROUTE_FAILURE" {
+            alert = VPNAlertInfo(
+                kind: .routeFailed,
+                title: "Routing Error",
+                message: "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair).",
+                detail: detail
+            )
+            message = "Routing Error: Lỗi thiết lập định tuyến mạng."
         } else {
-            if self.profiles.isEmpty {
-                self.profiles = []
-            }
+            alert = VPNAlertInfo(
+                kind: .generic,
+                title: stage.isEmpty ? "Lỗi kết nối" : stage,
+                message: detail.isEmpty ? "Kết nối thất bại" : detail,
+                detail: detail
+            )
+            message = "\(stage.isEmpty ? "Lỗi kết nối" : stage): \(detail)"
+        }
+
+        update(\.activeAlert, alert)
+        update(\.errorMessage, message)
+        update(\.isStaleSession, alert.kind == .sessionStale)
+        if alert.kind == .sessionStale, autoRetryCountdown == 0, retryTimer == nil, let prof = activeProfileName {
+            startAutoRetry(profileName: prof)
         }
     }
 
     func startAutoRetry(profileName: String) {
-        self.cancelAutoRetry()
-        self.autoRetryCountdown = 5
-        self.retryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+        cancelAutoRetry()
+        autoRetryCountdown = 5
+        retryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
             Task { @MainActor in
                 guard let self = self else { timer.invalidate(); return }
                 if self.autoRetryCountdown > 1 {
@@ -347,9 +348,9 @@ final class VPNManager: ObservableObject {
     }
 
     func cancelAutoRetry() {
-        self.retryTimer?.invalidate()
-        self.retryTimer = nil
-        self.autoRetryCountdown = 0
+        retryTimer?.invalidate()
+        retryTimer = nil
+        update(\.autoRetryCountdown, 0)
     }
 
     func toggleConnect(profile: VPNProfileItem) {
@@ -360,208 +361,313 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    /// 0ms optimistic UI update, held by a PendingIntent until the CLI catches up.
+    private func beginIntent(phase: String, profile: String?, timeout: TimeInterval) -> Int {
+        intentCounter += 1
+        pendingIntent = PendingIntent(id: intentCounter, phase: phase, profile: profile, since: Date(), timeout: timeout)
+
+        update(\.currentPhase, phase)
+        update(\.isConnecting, phase == "CONNECTING")
+        update(\.isConnected, false)
+        update(\.isStaleSession, false)
+        update(\.activeAlert, nil)
+        if let profile = profile {
+            update(\.activeProfileName, profile)
+        }
+        update(\.profiles, profiles.map { p in
+            var copy = p
+            copy.isConnected = false
+            copy.isConnecting = phase == "CONNECTING" && p.name == profile
+            return copy
+        })
+        onStatusChanged?(phase)
+        return intentCounter
+    }
+
+    /// Releases the intent once the CLI command it was waiting on has finished, so the
+    /// next poll shows the real outcome instead of waiting for the timeout.
+    private func endIntent(_ id: Int) {
+        if pendingIntent?.id == id {
+            pendingIntent = nil
+        }
+        syncFromDisk()
+    }
+
+    nonisolated private static func run(_ path: String, _ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: path)
+        p.arguments = args
+        try? p.run()
+        p.waitUntilExit()
+    }
+
+    /// Tears down any existing session: graceful CLI disconnect, then kill a hung daemon.
+    nonisolated private static func teardown(cli: String) {
+        run(cli, ["disconnect"])
+        run("/usr/bin/pkill", ["-9", "-f", "vpn connect"])
+    }
+
+    /// Launches `vpn connect` without blocking the serial queue — the spawner only exits once
+    /// the daemon reports success or failure, which can take the full connect timeout, and a
+    /// toggle-off queued behind it would otherwise wait that long.
+    nonisolated private static func launchConnect(cli: String, profileName: String, onExit: @escaping @Sendable () -> Void) {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: cli)
+        task.arguments = ["connect", "--profile", profileName]
+        task.terminationHandler = { _ in onExit() }
+        do {
+            try task.run()
+        } catch {
+            onExit()
+        }
+    }
+
     func connect(profileName: String) {
         cancelAutoRetry()
-        
-        // 0ms INSTANT OPTIMISTIC UI FEEDBACK
-        self.isConnecting = true
-        self.isConnected = false
-        self.currentPhase = "CONNECTING"
-        self.activeProfileName = profileName
-        self.errorMessage = nil
-        self.activeAlert = nil
-        self.isStaleSession = false
-        self.profiles = self.profiles.map { p in
-            var copy = p
-            if p.name == profileName {
-                copy.isConnecting = true
-                copy.isConnected = false
-            } else {
-                copy.isConnecting = false
-                copy.isConnected = false
-            }
-            return copy
-        }
-        self.onStatusChanged?("CONNECTING")
+        update(\.errorMessage, nil)
+        let id = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
 
-        // Serialized execution to prevent race condition when rapidly toggling off/on
-        operationQueue.async { [weak self] in
-            let cli = "/usr/local/bin/vpn"
-
-            // 1. Graceful disconnect of any existing session
-            let pDisc = Process()
-            pDisc.executableURL = URL(fileURLWithPath: cli)
-            pDisc.arguments = ["disconnect"]
-            try? pDisc.run()
-            pDisc.waitUntilExit()
-
-            // 2. Kill any hung CLI process safely
-            let pKill = Process()
-            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pKill.arguments = ["-9", "-f", "vpn connect"]
-            try? pKill.run()
-            pKill.waitUntilExit()
-
-            // 3. Short cooldown (0.3s) for interface & PID release
+        // Serialized so rapid off/on toggles can't interleave their CLI calls.
+        let cli = self.cli
+        operationQueue.async {
+            Self.teardown(cli: cli)
+            // Short cooldown for interface & PID release.
             Thread.sleep(forTimeInterval: 0.3)
-
-            // 4. Launch new connection
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: cli)
-            task.arguments = ["connect", "--profile", profileName]
-            try? task.run()
-
-            Task { @MainActor in
-                self?.syncFromDisk()
+            Self.launchConnect(cli: cli, profileName: profileName) {
+                Task { @MainActor in self.endIntent(id) }
             }
         }
     }
 
     func cleanupAndForceConnect(profileName: String) {
         cancelAutoRetry()
-        self.isConnecting = true
-        self.isConnected = false
-        self.currentPhase = "CONNECTING"
-        self.activeProfileName = profileName
-        self.errorMessage = "Đang đăng xuất phiên cũ & kết nối lại..."
-        self.profiles = self.profiles.map { p in
-            var copy = p
-            if p.name == profileName {
-                copy.isConnecting = true
-                copy.isConnected = false
-            } else {
-                copy.isConnecting = false
-                copy.isConnected = false
-            }
-            return copy
-        }
-        self.onStatusChanged?("CONNECTING")
+        let id = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
+        update(\.errorMessage, "Đang đăng xuất phiên cũ & kết nối lại...")
 
-        operationQueue.async { [weak self] in
-            let cli = "/usr/local/bin/vpn"
-
-            // 1. Explicit CLI Disconnect / Logout
-            let pDisc = Process()
-            pDisc.executableURL = URL(fileURLWithPath: cli)
-            pDisc.arguments = ["disconnect"]
-            try? pDisc.run()
-            pDisc.waitUntilExit()
-
-            // 2. Terminate background processes
-            let pKill = Process()
-            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pKill.arguments = ["-9", "-f", "vpn connect"]
-            try? pKill.run()
-            pKill.waitUntilExit()
-
-            // 3. Repair routing / DNS
-            let pRep = Process()
-            pRep.executableURL = URL(fileURLWithPath: cli)
-            pRep.arguments = ["repair"]
-            try? pRep.run()
-            pRep.waitUntilExit()
-
-            // 4. Give server 1.2s to flush RADIUS/L2TP session
+        let cli = self.cli
+        operationQueue.async {
+            Self.teardown(cli: cli)
+            Self.run(cli, ["repair"])
+            // Give the server time to flush the RADIUS/L2TP session.
             Thread.sleep(forTimeInterval: 1.2)
-
-            // 5. Connect again
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: cli)
-            task.arguments = ["connect", "--profile", profileName]
-            try? task.run()
-
-            Task { @MainActor in
-                self?.syncFromDisk()
+            Self.launchConnect(cli: cli, profileName: profileName) {
+                Task { @MainActor in self.endIntent(id) }
             }
         }
     }
 
     func disconnect() {
         cancelAutoRetry()
-        
-        // 0ms INSTANT OPTIMISTIC UI RESET
-        self.isConnecting = false
-        self.isConnected = false
-        self.isStaleSession = false
-        self.errorMessage = nil
-        self.currentPhase = "DISCONNECTED"
-        self.profiles = self.profiles.map { p in
-            var copy = p
-            copy.isConnected = false
-            copy.isConnecting = false
-            return copy
-        }
-        self.onStatusChanged?("DISCONNECTED")
+        update(\.errorMessage, nil)
+        let id = beginIntent(phase: "DISCONNECTED", profile: nil, timeout: 10)
 
-        operationQueue.async { [weak self] in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
-            task.arguments = ["disconnect"]
-            try? task.run()
-            task.waitUntilExit()
-
-            let pKill = Process()
-            pKill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pKill.arguments = ["-9", "-f", "vpn connect"]
-            try? pKill.run()
-            pKill.waitUntilExit()
-
-            Task { @MainActor in
-                self?.syncFromDisk()
-            }
-        }
-    }
-
-    func repairNetwork() {
-        cancelAutoRetry()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
-            task.arguments = ["repair"]
-            try? task.run()
+        let cli = self.cli
+        operationQueue.async {
+            Self.teardown(cli: cli)
+            Task { @MainActor in self.endIntent(id) }
         }
     }
 
     func deleteProfile(name: String) {
+        let cli = self.cli
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
-            task.arguments = ["profile", "remove", name]
-            try? task.run()
-            task.waitUntilExit()
-
-            Task { @MainActor in
-                self?.syncFromDisk()
-            }
+            Self.run(cli, ["profile", "remove", name])
+            Task { @MainActor in self?.syncFromDisk() }
         }
     }
 
     func saveProfile(name: String, server: String, user: String, psk: String, password: String, isFullTunnel: Bool, isNew: Bool) {
+        let cli = self.cli
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let cli = "/usr/local/bin/vpn"
-            
-            // 1. Add/Update Profile
-            let addProf = Process()
-            addProf.executableURL = URL(fileURLWithPath: cli)
             var args = ["profile", "add", name, "--server", server, "--psk", psk]
-            if isFullTunnel { args.append("--full-tunnel") }
-            addProf.arguments = args
-            try? addProf.run()
-            addProf.waitUntilExit()
+            args.append("--full-tunnel=\(isFullTunnel)")
+            Self.run(cli, args)
 
-            // 2. Add/Update Account
             if !user.isEmpty {
-                let addAcct = Process()
-                addAcct.executableURL = URL(fileURLWithPath: cli)
-                addAcct.arguments = ["account", "add", name, user, "--password", password, "--default"]
-                try? addAcct.run()
-                addAcct.waitUntilExit()
+                Self.run(cli, ["account", "add", name, user, "--password", password, "--default"])
             }
 
-            Task { @MainActor in
-                self?.syncFromDisk()
+            Task { @MainActor in self?.syncFromDisk() }
+        }
+    }
+}
+
+// MARK: - Link State & Palette
+
+enum LinkState: Equatable {
+    case idle, connecting, connected
+}
+
+extension VPNProfileItem {
+    var linkState: LinkState {
+        isConnecting ? .connecting : (isConnected ? .connected : .idle)
+    }
+}
+
+enum VPNColors {
+    static let green = Color(red: 0.2, green: 0.9, blue: 0.55)
+    static let greenBright = Color(red: 0.6, green: 1.0, blue: 0.8)
+    static let amber = Color(red: 0.98, green: 0.62, blue: 0.1)
+    static let amberBright = Color(red: 1.0, green: 0.9, blue: 0.62)
+    static let switchOff = Color(red: 0.2, green: 0.25, blue: 0.33)
+}
+
+// MARK: - Animation Primitives
+//
+// Every looping effect below is driven by TimelineView and derives its phase from
+// wall-clock time rather than `repeatForever` + `onAppear`. The old approach restarted
+// or froze whenever SwiftUI re-created the view (every state change or poll re-render),
+// which is what made the borders stutter. Tracing along the outline path also keeps the
+// light moving at constant speed; a rotating AngularGradient on a wide card raced along
+// the long edges and dropped out at the short ones.
+
+/// A slice of a rounded-rect outline, wrapping past the path's start point.
+struct PerimeterSegment: Shape {
+    var cornerRadius: CGFloat
+    var inset: CGFloat
+    var start: CGFloat
+    var length: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        let outline = RoundedRectangle(cornerRadius: max(cornerRadius - inset, 0))
+            .path(in: rect.insetBy(dx: inset, dy: inset))
+        let end = start + length
+        if end <= 1 {
+            return outline.trimmedPath(from: start, to: end)
+        }
+        var path = outline.trimmedPath(from: start, to: 1)
+        path.addPath(outline.trimmedPath(from: 0, to: end - 1))
+        return path
+    }
+}
+
+/// A comet of light that travels around a rounded rectangle, fading out along its tail.
+struct TracingBorder: View {
+    var cornerRadius: CGFloat
+    var color: Color
+    var highlight: Color
+    var period: Double
+    var lineWidth: CGFloat = 1.6
+    var tailLength: CGFloat = 0.3
+
+    private let tailSteps = 8
+
+    var body: some View {
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            let head = CGFloat((t / period).truncatingRemainder(dividingBy: 1))
+            ZStack {
+                // Overlapping segments that all end at the head: alpha accumulates towards
+                // the head, giving a smooth fade without a gradient along the path.
+                ForEach(0..<tailSteps, id: \.self) { i in
+                    let length = tailLength * CGFloat(tailSteps - i) / CGFloat(tailSteps)
+                    PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
+                                     start: wrapUnit(head - length), length: length)
+                        .stroke(color.opacity(0.28), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                }
+                PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
+                                 start: wrapUnit(head - 0.04), length: 0.04)
+                    .stroke(highlight, style: StrokeStyle(lineWidth: lineWidth + 0.4, lineCap: .round))
+                    .shadow(color: color, radius: 4)
             }
         }
+        .allowsHitTesting(false)
+    }
+
+    private func wrapUnit(_ x: CGFloat) -> CGFloat {
+        x - x.rounded(.down)
+    }
+}
+
+/// Outline for a card / badge: faint idle stroke, amber comet while connecting,
+/// slower green comet (or a static glow) once connected. Crossfades between states.
+struct StatusBorder: View {
+    var state: LinkState
+    var cornerRadius: CGFloat
+    var idleColor: Color = Color.white.opacity(0.08)
+    var lineWidth: CGFloat = 1.6
+    var tracesWhenConnected: Bool = true
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .strokeBorder(baseColor, lineWidth: 1)
+
+            if state == .connecting {
+                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.amber, highlight: VPNColors.amberBright,
+                              period: 1.8, lineWidth: lineWidth, tailLength: 0.35)
+                    .transition(.opacity)
+            } else if state == .connected && tracesWhenConnected {
+                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.green, highlight: VPNColors.greenBright,
+                              period: 3.6, lineWidth: lineWidth, tailLength: 0.22)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.35), value: state)
+    }
+
+    private var baseColor: Color {
+        switch state {
+        case .idle: return idleColor
+        case .connecting: return VPNColors.amber.opacity(0.4)
+        case .connected: return VPNColors.green.opacity(0.6)
+        }
+    }
+}
+
+/// Status dot with a soft expanding halo while `pulsing`.
+struct StatusDot: View {
+    var color: Color
+    var size: CGFloat
+    var pulsing: Bool = false
+    var glowing: Bool = false
+
+    var body: some View {
+        ZStack {
+            if pulsing {
+                TimelineView(.animation) { timeline in
+                    let p = CGFloat((timeline.date.timeIntervalSinceReferenceDate / 1.4).truncatingRemainder(dividingBy: 1))
+                    Circle()
+                        .fill(color.opacity(0.45 * Double(1 - p)))
+                        .frame(width: size, height: size)
+                        .scaleEffect(1 + 1.6 * p)
+                }
+                .transition(.opacity)
+            }
+            Circle()
+                .fill(color)
+                .frame(width: size, height: size)
+                .shadow(color: color.opacity(pulsing || glowing ? 0.85 : 0), radius: 4)
+        }
+        .animation(.easeInOut(duration: 0.3), value: pulsing)
+    }
+}
+
+/// Switch with a spring-driven knob and crossfading tint, replacing the stock
+/// SwitchToggleStyle whose tint snapped when flipping between amber and green.
+struct GlowSwitch: View {
+    var isOn: Bool
+    var tint: Color
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Capsule()
+                    .fill(isOn ? tint : VPNColors.switchOff)
+                    .shadow(color: isOn ? tint.opacity(0.5) : .clear, radius: 6)
+                Circle()
+                    .fill(Color.white)
+                    .frame(width: 18, height: 18)
+                    .shadow(color: Color.black.opacity(0.3), radius: 1.5, y: 0.5)
+                    .offset(x: isOn ? 9 : -9)
+            }
+            .frame(width: 42, height: 24)
+            .contentShape(Capsule())
+            .animation(.spring(response: 0.3, dampingFraction: 0.75), value: isOn)
+            .animation(.easeInOut(duration: 0.3), value: tint)
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -569,155 +675,46 @@ final class VPNManager: ObservableObject {
 
 struct MacOSMenuBar: View {
     @ObservedObject var vpn = VPNManager.shared
-    @State private var isRotating: Bool = false
-    @State private var isPulsing: Bool = false
 
     var body: some View {
+        let state = vpn.linkState
         HStack(spacing: 0) {
             ZStack {
-                if vpn.isConnecting {
+                if state == .connected {
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.orange.opacity(0.2), lineWidth: 1)
-                        .overlay(
-                            AngularGradient(
-                                gradient: Gradient(colors: [
-                                    Color.clear,
-                                    Color.clear,
-                                    Color.orange.opacity(0.3),
-                                    Color.orange,
-                                    Color(red: 1.0, green: 0.95, blue: 0.7),
-                                    Color.clear
-                                ]),
-                                center: .center
-                            )
-                            .rotationEffect(.degrees(isRotating ? 360 : 0))
-                            .animation(
-                                Animation.linear(duration: 1.8).repeatForever(autoreverses: false),
-                                value: isRotating
-                            )
-                            .mask(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(lineWidth: 2.0)
-                            )
-                        )
-                        .shadow(color: Color.orange.opacity(0.85), radius: 4)
-                        .onAppear {
-                            isRotating = true
-                        }
-                } else if vpn.isConnected {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(
-                            Color(red: 0.2, green: 0.9, blue: 0.55),
-                            lineWidth: isPulsing ? 1.8 : 1.0
-                        )
-                        .shadow(
-                            color: Color(red: 0.2, green: 0.95, blue: 0.6).opacity(isPulsing ? 0.9 : 0.2),
-                            radius: isPulsing ? 5 : 2
-                        )
-                        .opacity(isPulsing ? 1.0 : 0.75)
-                        .animation(
-                            Animation.easeInOut(duration: 1.2).repeatForever(autoreverses: true),
-                            value: isPulsing
-                        )
-                        .onAppear {
-                            isPulsing = true
-                        }
-                } else {
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.white.opacity(0.15), lineWidth: 1)
+                        .fill(VPNColors.green.opacity(0.14))
+                        .shadow(color: VPNColors.green.opacity(0.6), radius: 3)
+                        .transition(.opacity)
                 }
 
-                Image(systemName: vpn.isConnected ? "checkmark.shield.fill" : (vpn.isConnecting ? "shield.lefthalf.filled" : "shield"))
+                // Connected stays static in the menu bar: an always-visible 60fps loop
+                // would keep the app redrawing for as long as the tunnel is up.
+                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15),
+                             lineWidth: 1.5, tracesWhenConnected: false)
+
+                Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(
-                        vpn.isConnected ? Color(red: 0.2, green: 0.95, blue: 0.6) :
-                        (vpn.isConnecting ? Color.orange : Color.white.opacity(0.85))
+                        state == .connected ? VPNColors.green :
+                        (state == .connecting ? VPNColors.amber : Color.white.opacity(0.85))
                     )
 
-                if vpn.isConnected {
+                if state != .idle {
                     Circle()
-                        .fill(Color(red: 0.2, green: 0.98, blue: 0.65))
+                        .fill(state == .connected ? VPNColors.green : VPNColors.amber)
                         .frame(width: 5, height: 5)
                         .offset(x: 6, y: -6)
-                } else if vpn.isConnecting {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 5, height: 5)
-                        .offset(x: 6, y: -6)
+                        .transition(.scale.combined(with: .opacity))
                 }
             }
             .frame(width: 22, height: 22)
+            .animation(.easeInOut(duration: 0.3), value: state)
         }
         .frame(width: 28, height: 22)
         .contentShape(Rectangle())
         .onTapGesture {
             AppDelegate.shared?.togglePopover(nil)
         }
-    }
-}
-
-// MARK: - Animated Rotating Linear Border Component (SwiftUI Native 60/120fps)
-
-struct ConnectingLinearBorder: View {
-    var cornerRadius: CGFloat = 13
-    @State private var isRotating = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius)
-            .stroke(Color.orange.opacity(0.15), lineWidth: 1.5)
-            .overlay(
-                AngularGradient(
-                    gradient: Gradient(colors: [
-                        Color.clear,
-                        Color.clear,
-                        Color.orange.opacity(0.25),
-                        Color.orange,
-                        Color(red: 1.0, green: 0.95, blue: 0.7),
-                        Color.clear
-                    ]),
-                    center: .center
-                )
-                .rotationEffect(.degrees(isRotating ? 360 : 0))
-                .animation(
-                    Animation.linear(duration: 1.8).repeatForever(autoreverses: false),
-                    value: isRotating
-                )
-                .mask(
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .stroke(lineWidth: 2.2)
-                )
-            )
-            .shadow(color: Color.orange.opacity(0.8), radius: 8)
-            .onAppear {
-                isRotating = true
-            }
-    }
-}
-
-// MARK: - Connected Green Pulse Border (SwiftUI Native)
-
-struct ConnectedPulseBorder: View {
-    var cornerRadius: CGFloat = 13
-    @State private var isPulsing = false
-
-    var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius)
-            .stroke(
-                Color(red: 0.2, green: 0.9, blue: 0.55),
-                lineWidth: isPulsing ? 2.0 : 1.2
-            )
-            .shadow(
-                color: Color(red: 0.2, green: 0.95, blue: 0.6).opacity(isPulsing ? 0.9 : 0.25),
-                radius: isPulsing ? 9 : 2
-            )
-            .opacity(isPulsing ? 1.0 : 0.75)
-            .animation(
-                Animation.easeInOut(duration: 1.2).repeatForever(autoreverses: true),
-                value: isPulsing
-            )
-            .onAppear {
-                isPulsing = true
-            }
     }
 }
 
@@ -782,44 +779,55 @@ struct ProfileCardRow: View {
     var onDelete: () -> Void
 
     var body: some View {
+        let state = profile.linkState
         HStack(spacing: 12) {
-            // Status Dot
-            Circle()
-                .fill(profile.isConnected ? Color(red: 0.2, green: 0.88, blue: 0.55) : (profile.isConnecting ? Color.orange : Color.gray.opacity(0.6)))
-                .frame(width: 9, height: 9)
-                .shadow(color: profile.isConnected ? Color.green.opacity(0.8) : (profile.isConnecting ? Color.orange.opacity(0.8) : Color.clear), radius: 4)
+            StatusDot(
+                color: state == .connected ? VPNColors.green : (state == .connecting ? VPNColors.amber : Color.gray.opacity(0.6)),
+                size: 9,
+                pulsing: state == .connecting,
+                glowing: state == .connected
+            )
 
             // Profile Name & Subtitle
             VStack(alignment: .leading, spacing: 2) {
                 Text(profile.name)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(profile.isConnected ? .white : (profile.isConnecting ? Color(red: 1.0, green: 0.9, blue: 0.7) : Color(red: 0.85, green: 0.88, blue: 0.92)))
+                    .foregroundColor(state == .connected ? .white : (state == .connecting ? Color(red: 1.0, green: 0.9, blue: 0.7) : Color(red: 0.85, green: 0.88, blue: 0.92)))
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                HStack(spacing: 4) {
-                    Text(profile.server)
-                        .font(.system(size: 11))
-                        .foregroundColor(Color.gray)
-                        .lineLimit(1)
-                    if !profile.username.isEmpty {
-                        Text("• \(profile.username)")
-                            .font(.system(size: 11))
-                            .foregroundColor(Color.gray.opacity(0.8))
+                ZStack(alignment: .leading) {
+                    if state == .connecting {
+                        Text("Đang kết nối đến máy chủ...")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(VPNColors.amber)
                             .lineLimit(1)
+                            .transition(.opacity)
+                    } else {
+                        HStack(spacing: 4) {
+                            Text(profile.server)
+                                .font(.system(size: 11))
+                                .foregroundColor(Color.gray)
+                                .lineLimit(1)
+                            if !profile.username.isEmpty {
+                                Text("• \(profile.username)")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Color.gray.opacity(0.8))
+                                    .lineLimit(1)
+                            }
+                        }
+                        .transition(.opacity)
                     }
                 }
             }
 
             Spacer(minLength: 8)
 
-            // Toggle Switch
-            Toggle("", isOn: Binding(
-                get: { profile.isConnected || profile.isConnecting },
-                set: { _ in vpn.toggleConnect(profile: profile) }
-            ))
-            .toggleStyle(SwitchToggleStyle(tint: profile.isConnecting ? Color.orange : Color(red: 0.15, green: 0.8, blue: 0.55)))
-            .labelsHidden()
+            GlowSwitch(
+                isOn: state != .idle,
+                tint: state == .connecting ? VPNColors.amber : VPNColors.green,
+                action: { vpn.toggleConnect(profile: profile) }
+            )
 
             // Context Menu Button
             CustomMenuButton(
@@ -833,20 +841,18 @@ struct ProfileCardRow: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 13)
                     .fill(
-                        profile.isConnected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
-                        (profile.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.1, green: 0.12, blue: 0.16).opacity(0.85))
+                        state == .connected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
+                        (state == .connecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.1, green: 0.12, blue: 0.16).opacity(0.85))
+                    )
+                    .shadow(
+                        color: state == .connected ? VPNColors.green.opacity(0.3) : (state == .connecting ? VPNColors.amber.opacity(0.3) : .clear),
+                        radius: 10
                     )
 
-                if profile.isConnecting {
-                    ConnectingLinearBorder(cornerRadius: 13)
-                } else if profile.isConnected {
-                    ConnectedPulseBorder(cornerRadius: 13)
-                } else {
-                    RoundedRectangle(cornerRadius: 13)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                }
+                StatusBorder(state: state, cornerRadius: 13)
             }
         )
+        .animation(.easeInOut(duration: 0.3), value: state)
     }
 }
 
@@ -856,42 +862,37 @@ struct MenuBarPopupView: View {
     @State private var editingProfile: VPNProfileItem?
 
     var body: some View {
+        let state = vpn.linkState
         VStack(spacing: 0) {
             // Header Bar (Clean, NO Settings Icon)
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
                         .fill(
-                            vpn.isConnected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
-                            (vpn.isConnecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.05, green: 0.16, blue: 0.22))
+                            state == .connected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
+                            (state == .connecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.05, green: 0.16, blue: 0.22))
+                        )
+                        .shadow(
+                            color: state == .connected ? VPNColors.green.opacity(0.35) : (state == .connecting ? VPNColors.amber.opacity(0.35) : Color(red: 0.08, green: 0.72, blue: 0.82).opacity(0.25)),
+                            radius: 8
                         )
 
-                    if vpn.isConnecting {
-                        ConnectingLinearBorder(cornerRadius: 12)
-                    } else if vpn.isConnected {
-                        ConnectedPulseBorder(cornerRadius: 12)
-                    } else {
-                        RoundedRectangle(cornerRadius: 12)
-                            .stroke(Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 1)
-                    }
+                    StatusBorder(state: state, cornerRadius: 12,
+                                 idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 2)
 
-                    Image(systemName: vpn.isConnected ? "checkmark.shield.fill" : (vpn.isConnecting ? "shield.lefthalf.filled" : "shield.fill"))
+                    Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield.fill"))
                         .font(.system(size: 20))
                         .foregroundColor(
-                            vpn.isConnected ? Color(red: 0.2, green: 0.9, blue: 0.6) :
-                            (vpn.isConnecting ? Color.orange : Color(red: 0.2, green: 0.75, blue: 0.95))
+                            state == .connected ? VPNColors.green :
+                            (state == .connecting ? VPNColors.amber : Color(red: 0.2, green: 0.75, blue: 0.95))
                         )
-                    
-                    if vpn.isConnected {
+
+                    if state != .idle {
                         Circle()
-                            .fill(Color(red: 0.2, green: 0.95, blue: 0.6))
+                            .fill(state == .connected ? VPNColors.green : VPNColors.amber)
                             .frame(width: 7, height: 7)
                             .offset(x: 9, y: -9)
-                    } else if vpn.isConnecting {
-                        Circle()
-                            .fill(Color.orange)
-                            .frame(width: 7, height: 7)
-                            .offset(x: 9, y: -9)
+                            .transition(.scale.combined(with: .opacity))
                     }
                 }
                 .frame(width: 40, height: 40)
@@ -900,12 +901,19 @@ struct MenuBarPopupView: View {
                     Text("TMS-VPN")
                         .font(.system(size: 16, weight: .bold))
                         .foregroundColor(.white)
-                    Circle()
-                        .fill(vpn.isConnected ? Color(red: 0.2, green: 0.85, blue: 0.55) : (vpn.isConnecting ? Color.orange : Color.gray))
-                        .frame(width: 7, height: 7)
-                    Text(vpn.isConnected ? "Đã kết nối" : (vpn.isConnecting ? "Đang kết nối..." : "Đã ngắt kết nối"))
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(vpn.isConnected ? Color(red: 0.2, green: 0.85, blue: 0.55) : (vpn.isConnecting ? Color.orange : Color.gray))
+                    StatusDot(
+                        color: state == .connected ? VPNColors.green : (state == .connecting ? VPNColors.amber : Color.gray),
+                        size: 7,
+                        pulsing: state == .connecting,
+                        glowing: state == .connected
+                    )
+                    ZStack(alignment: .leading) {
+                        Text(state == .connected ? "Đã kết nối" : (state == .connecting ? "Đang kết nối..." : "Đã ngắt kết nối"))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(state == .connected ? VPNColors.green : (state == .connecting ? VPNColors.amber : Color.gray))
+                            .id(state)
+                            .transition(.opacity)
+                    }
                 }
 
                 Spacer()
@@ -917,7 +925,7 @@ struct MenuBarPopupView: View {
             Divider().background(Color.white.opacity(0.08))
 
             // Active Connection Info Banner when connected
-            if vpn.isConnected {
+            if state == .connected {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("ĐANG HOẠT ĐỘNG")
@@ -953,6 +961,7 @@ struct MenuBarPopupView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 .background(Color(red: 0.04, green: 0.15, blue: 0.1))
+                .transition(.opacity)
 
                 Divider().background(Color.white.opacity(0.08))
             }
@@ -1175,6 +1184,8 @@ struct MenuBarPopupView: View {
         }
         .frame(width: 370)
         .background(Color(red: 0.07, green: 0.09, blue: 0.12))
+        .animation(.easeInOut(duration: 0.3), value: state)
+        .animation(.easeInOut(duration: 0.25), value: vpn.activeAlert)
         .sheet(isPresented: $showingAddModal) {
             ProfileFormSheet(isPresented: $showingAddModal, initialProfile: nil)
         }

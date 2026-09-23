@@ -224,7 +224,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟠 Connecting (Viền xoay 2s)
+            🟠 Connecting (Viền sáng chạy)
           </button>
           <button
             onClick={() => {
@@ -237,7 +237,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟢 Connected (Xung nhịp)
+            🟢 Connected (Viền sáng chậm)
           </button>
           <button
             onClick={() => {
