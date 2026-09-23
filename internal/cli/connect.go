@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,7 +45,11 @@ func cmdConnect(args []string) error {
 	// Catch configuration problems here, where the user can see them: the
 	// daemon's stderr is /dev/null, so if it exited over a missing account
 	// or secret, all this process could report is that it never started.
-	if _, err := resolveTarget(*profileName, *accountName); err != nil {
+	t, err := resolveTarget(*profileName, *accountName)
+	if err != nil {
+		return err
+	}
+	if err := t.checkSecretsStored(); err != nil {
 		return err
 	}
 
@@ -56,7 +61,7 @@ func cmdConnect(args []string) error {
 	// this closes; it's why this can't just be two separate steps like it
 	// used to be.
 	var cmd *exec.Cmd
-	err := engine.WithConnectLock(func() error {
+	err = engine.WithConnectLock(func() error {
 		if err := engine.PrepareNewConnect(); err != nil {
 			return fmt.Errorf("disconnect previous session: %w", err)
 		}
@@ -138,8 +143,7 @@ type connectTarget struct {
 	accountName string
 }
 
-// resolveTarget resolves the profile and account a connect would use and
-// confirms both secrets are stored (without reading them) — the checks
+// resolveTarget resolves the profile and account a connect would use —
 // shared by the foreground preflight in cmdConnect and doConnect itself.
 func resolveTarget(profileName, accountName string) (*connectTarget, error) {
 	cfg, err := config.Load()
@@ -154,13 +158,36 @@ func resolveTarget(profileName, accountName string) (*connectTarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("profile %q: %w — run `vpn account add %s <username> --default`", pName, err, pName)
 	}
-	if !keychain.HasPSK(pName) {
-		return nil, fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`", pName)
-	}
-	if !keychain.HasPassword(pName, aName) {
-		return nil, fmt.Errorf("no password stored for account %q — run `vpn account add %s %s`", aName, pName, aName)
-	}
 	return &connectTarget{profileName: pName, profile: p, accountName: aName}, nil
+}
+
+// checkSecretsStored confirms the PSK and password exist in Keychain
+// without reading them — cmdConnect's preflight; the daemon simply reads
+// them and reports the same errors if they are missing.
+func (t *connectTarget) checkSecretsStored() error {
+	if !keychain.HasPSK(t.profileName) {
+		return t.errNoPSK(nil)
+	}
+	if !keychain.HasPassword(t.profileName, t.accountName) {
+		return t.errNoPassword(nil)
+	}
+	return nil
+}
+
+func (t *connectTarget) errNoPSK(cause error) error {
+	msg := fmt.Sprintf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`", t.profileName)
+	if cause != nil {
+		return fmt.Errorf("%s: %w", msg, cause)
+	}
+	return errors.New(msg)
+}
+
+func (t *connectTarget) errNoPassword(cause error) error {
+	msg := fmt.Sprintf("no password stored for account %q — run `vpn account add %s %s`", t.accountName, t.profileName, t.accountName)
+	if cause != nil {
+		return fmt.Errorf("%s: %w", msg, cause)
+	}
+	return errors.New(msg)
 }
 
 func doConnect(profileName, accountName string, timeout time.Duration, verbose bool) error {
@@ -171,11 +198,11 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 	pName, p, aName := t.profileName, t.profile, t.accountName
 	psk, err := keychain.GetPSK(pName)
 	if err != nil {
-		return fmt.Errorf("no PSK stored for profile %q — add it in the TMS VPN menu bar app or run `vpn profile add`: %w", pName, err)
+		return t.errNoPSK(err)
 	}
 	password, err := keychain.GetPassword(pName, aName)
 	if err != nil {
-		return fmt.Errorf("no password stored for account %q — run `vpn account add`: %w", aName, err)
+		return t.errNoPassword(err)
 	}
 
 	return engine.Connect(engine.Config{
@@ -260,7 +287,7 @@ func cmdLogs(args []string) error {
 	// permission denied, so briefly elevate just to read/tail it.
 	return privilege.Elevate(func() error {
 		if *follow {
-			c := exec.Command(sysbin.Tail, "-f", logPath)
+			c := exec.Command(sysbin.Tail, "-F", logPath) // -F: keep following across a rotation
 			c.Stdout = os.Stdout
 			c.Stderr = os.Stderr
 			return c.Run()

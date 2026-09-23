@@ -67,7 +67,7 @@ func genuineSuccess(challenge []byte, username, password string) func([]byte) st
 	}
 }
 
-func runAuthAgainst(t *testing.T, lns *fakeLNS) error {
+func runAuthAgainst(t *testing.T, lns Transport) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -96,5 +96,41 @@ func TestRunAuthRejectsImpersonator(t *testing.T) {
 		if err := runAuthAgainst(t, lns); err == nil {
 			t.Fatalf("%s: impersonating LNS was accepted", name)
 		}
+	}
+}
+
+// fakeRetransmittingLNS sends the Challenge twice (as after a lost Response)
+// and answers with the Success computed for the client's FIRST Response,
+// the way pppd resends its cached Success.
+type fakeRetransmittingLNS struct {
+	*fakeLNS
+	responses [][]byte
+}
+
+func (f *fakeRetransmittingLNS) SendFrame(protocol uint16, payload []byte) error {
+	pkt, err := ParseCHAPPacket(payload)
+	if err != nil || pkt.Code != CHAPCodeResponse {
+		return err
+	}
+	f.responses = append(f.responses, append([]byte{}, pkt.Value...))
+	if len(f.responses) == 1 {
+		ch := CHAPPacket{Code: CHAPCodeChallenge, Identifier: 7, Value: f.challenge, Name: []byte("lns")}
+		f.inbox <- fakeFrame{ProtoCHAP, ch.Marshal()}
+		return nil
+	}
+	ok := CHAPPacket{Code: CHAPCodeSuccess, Identifier: pkt.Identifier, Message: []byte(f.successMsg(f.responses[0]))}
+	f.inbox <- fakeFrame{ProtoCHAP, ok.Marshal()}
+	return nil
+}
+
+func TestRunAuthAcceptsSuccessForEarlierResponse(t *testing.T) {
+	base := newFakeLNS(nil)
+	base.successMsg = genuineSuccess(base.challenge, "alice", "correct horse")
+	lns := &fakeRetransmittingLNS{fakeLNS: base}
+	if err := runAuthAgainst(t, lns); err != nil {
+		t.Fatalf("Success for the first of two Responses rejected: %v", err)
+	}
+	if len(lns.responses) != 2 {
+		t.Fatalf("expected two Responses, got %d", len(lns.responses))
 	}
 }

@@ -84,7 +84,23 @@ func espProposalFor(s string) (Transform, error) {
 		return Transform{}, fmt.Errorf("ESP proposal %q: %w", s, err)
 	}
 	full.Group = 0
+	// ParseProposal also knows md5 (IKE vocabulary), but ESP only
+	// implements SHA-1 and SHA-256 integrity.
+	if _, err := espAuthAlgorithm(full.Hash); err != nil {
+		return Transform{}, fmt.Errorf("ESP proposal %q: %w (use sha1 or sha256)", s, err)
+	}
 	return full, nil
+}
+
+// ValidateESPProposals checks a profile's ESP proposals up front, so a bad
+// one fails before any packet is sent rather than after Phase 1.
+func ValidateESPProposals(proposals []string) error {
+	for _, p := range proposals {
+		if _, err := espProposalFor(p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func espTransformID(t Transform) (int, error) {

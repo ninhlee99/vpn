@@ -116,8 +116,12 @@ func (k *KeyPair) PublicBytes() []byte {
 // own, but key agreement must not silently accept a degenerate value.
 func (k *KeyPair) SharedSecret(peerPublic []byte) ([]byte, error) {
 	size := k.Group.BitLen / 8
-	if len(peerPublic) != size {
-		return nil, fmt.Errorf("peer KE payload is %d bytes, want %d for DH group %d", len(peerPublic), size, k.Group.ID)
+	// RFC 2409 §5 says the value MUST be zero-padded to the group size, but
+	// a peer that drops a leading zero byte (1 in 256 values) would
+	// otherwise fail at random; a shorter value is the same integer, and
+	// the range check below is what actually guards the key agreement.
+	if len(peerPublic) > size {
+		return nil, fmt.Errorf("peer KE payload is %d bytes, more than the %d of DH group %d", len(peerPublic), size, k.Group.ID)
 	}
 	peer := new(big.Int).SetBytes(peerPublic)
 	pMinus1 := new(big.Int).Sub(k.Group.Prime, big.NewInt(1))

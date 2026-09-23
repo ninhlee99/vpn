@@ -31,13 +31,32 @@ func TestSharedSecretRejectsDegeneratePeerValues(t *testing.T) {
 	}
 }
 
-func TestSharedSecretRejectsWrongLength(t *testing.T) {
-	kp, err := GenerateKeyPair(Groups[2])
+func TestSharedSecretLength(t *testing.T) {
+	a, err := GenerateKeyPair(Groups[2])
 	if err != nil {
 		t.Fatalf("GenerateKeyPair: %v", err)
 	}
-	if _, err := kp.SharedSecret([]byte{1, 2, 3}); err == nil {
-		t.Fatal("SharedSecret accepted a short KE payload")
+	size := Groups[2].BitLen / 8
+
+	// An unpadded public value (leading zero bytes dropped) is the same
+	// integer and must agree on the same secret as the padded one.
+	peer := big.NewInt(123456789) // well inside [2, p-2], far shorter than size
+	unpadded := peer.Bytes()
+	padded := leftPad(unpadded, size)
+	want, err := a.SharedSecret(padded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.SharedSecret(unpadded)
+	if err != nil {
+		t.Fatalf("unpadded KE value rejected: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("unpadded KE value produced a different shared secret")
+	}
+
+	if _, err := a.SharedSecret(make([]byte, size+1)); err == nil {
+		t.Fatal("SharedSecret accepted an overlong KE payload")
 	}
 }
 

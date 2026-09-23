@@ -36,6 +36,13 @@ else
   # entries (service names vpn.psk.* / vpn.pwd.*) cannot be enumerated
   # reliably from here — delete them in Keychain Access if any remain.
   echo "⚠️  vpn uninstall unavailable — removing files directly."
+  # Tear the tunnel down first so routes/DNS are restored while the binary
+  # still exists. Run as root: a real uid of 0 skips the owner check that
+  # may be exactly why `vpn uninstall` failed above.
+  if [ -x "$CLI" ]; then
+    sudo "$CLI" disconnect || true
+    sudo "$CLI" repair || true
+  fi
   sudo rm -f "$CLI" /etc/vpn-owner-uid /var/log/vpn.log /var/log/vpn.log.1
   sudo rm -rf /var/run/vpn
   rm -rf "$HOME/.config/vpn"

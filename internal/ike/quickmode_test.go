@@ -86,3 +86,9 @@ func TestVerifyQuickModeHash2(t *testing.T) {
 		t.Fatal("tampered QM2 accepted")
 	}
 }
+
+func TestESPProposalRejectsUnsupportedIntegrity(t *testing.T) {
+	if _, err := espProposalFor("aes128-md5"); err == nil {
+		t.Fatal("aes128-md5 accepted though ESP has no MD5 integrity")
+	}
+}

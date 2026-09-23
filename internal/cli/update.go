@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +45,10 @@ func cmdUpdate(args []string) error {
 	asset := "vpn-darwin-" + arch
 
 	bin, version, err := downloadVerified(releaseAssetBaseURL, asset, *force)
+	if errors.Is(err, errUpToDate) {
+		fmt.Printf("Already up to date (%s).\n", Version)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -111,6 +116,10 @@ func downloadVerified(baseURL, asset string, force bool) (bin []byte, version st
 	return bin, manifest.Version, nil
 }
 
+// errUpToDate is checkNewer's "nothing to do" outcome — not a failure, so
+// cmdUpdate reports it and exits 0.
+var errUpToDate = errors.New("already up to date")
+
 // checkNewer refuses a downgrade or reinstall unless forced: without it, a
 // party able to serve release assets could replay an older, genuinely
 // signed release that has a known vulnerability. A current build that is
@@ -126,7 +135,7 @@ func checkNewer(candidate, current string, force bool) error {
 	}
 	switch next.Compare(cur) {
 	case 0:
-		return fmt.Errorf("already up to date (%s)", current)
+		return errUpToDate
 	case -1:
 		return fmt.Errorf("latest release %s is older than this binary (%s) — refusing to downgrade (use --force to override)", candidate, current)
 	}

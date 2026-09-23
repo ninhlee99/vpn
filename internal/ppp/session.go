@@ -300,9 +300,12 @@ func Terminate(t Transport, id uint8) {
 }
 
 func runAuth(ctx context.Context, t Transport, username, password string) error {
-	// The response to the most recent Challenge — a retransmitted Challenge
-	// gets a fresh one, and Success must be checked against the latest.
-	var lastResp *MSCHAPv2Response
+	// Every Response sent so far. A retransmitted Challenge gets a fresh
+	// Response (new PeerChallenge), but the LNS may still answer an earlier
+	// one — e.g. pppd resends the Success it already computed for Response
+	// #1 when a late Response #2 arrives — so Success is valid if it
+	// authenticates any Response we actually sent.
+	var sent []*MSCHAPv2Response
 	for {
 		frameCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		proto, payload, err := t.RecvFrame(frameCtx)
@@ -345,19 +348,22 @@ func runAuth(ctx context.Context, t Transport, username, password string) error 
 			if err != nil {
 				return err
 			}
-			lastResp = resp
+			sent = append(sent, resp)
 			reply := CHAPPacket{Code: CHAPCodeResponse, Identifier: pkt.Identifier, Value: resp.Marshal(), Name: []byte(username)}
 			if err := t.SendFrame(ProtoCHAP, reply.Marshal()); err != nil {
 				return err
 			}
 		case CHAPCodeSuccess:
-			if lastResp == nil {
+			if len(sent) == 0 {
 				return fmt.Errorf("CHAP Success received before any Challenge was answered")
 			}
-			if err := lastResp.VerifySuccess(pkt.Message); err != nil {
-				return err
+			var verifyErr error
+			for _, r := range sent {
+				if verifyErr = r.VerifySuccess(pkt.Message); verifyErr == nil {
+					return nil
+				}
 			}
-			return nil
+			return verifyErr
 		case CHAPCodeFailure:
 			return fmt.Errorf("CHAP authentication rejected by peer: %s", string(pkt.Message))
 		}

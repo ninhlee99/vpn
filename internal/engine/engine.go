@@ -127,13 +127,24 @@ func Connect(cfg Config) error {
 			}
 			st.Phase = state.PhaseFailed
 			st.FailStage = stage
+			// Include the cause: `vpn connect` and the menu bar app only
+			// see state.json, and the app tells failures apart by this text
+			// (e.g. "already logged in", "CHAP authentication rejected",
+			// "authenticator response"). A bare stage label left them all
+			// looking alike.
 			st.FailDetail = detail
+			if err != nil {
+				st.FailDetail = fmt.Sprintf("%s: %v", detail, err)
+			}
 			_ = st.Save()
 			vpnlog.Error(stage, detail, vpnlog.Fields{"err": err})
 			return fmt.Errorf("%s: %s: %w", stage, detail, err)
 		}
 
 		var err error
+		if err := ike.ValidateESPProposals(cfg.ESPProposals); err != nil {
+			return fail("IPSEC_FAILURE", "invalid ESP proposal in profile", err)
+		}
 		rtSnapshot, err = routing.Capture()
 		if err != nil {
 			return fail("ROUTE_FAILURE", "capture current routing state", err)

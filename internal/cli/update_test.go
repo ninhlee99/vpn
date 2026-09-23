@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -95,5 +96,13 @@ func TestDownloadVerifiedForceAllowsReinstall(t *testing.T) {
 	base := fakeRelease(t, "v1.0.0", []byte("genuine binary"), nil)
 	if _, _, err := downloadVerified(base, "vpn-darwin-arm64", true); err != nil {
 		t.Fatalf("--force reinstall rejected: %v", err)
+	}
+}
+
+func TestDownloadVerifiedReportsUpToDate(t *testing.T) {
+	withVersion(t, "v1.0.0")
+	base := fakeRelease(t, "v1.0.0", []byte("genuine binary"), nil)
+	if _, _, err := downloadVerified(base, "vpn-darwin-arm64", false); !errors.Is(err, errUpToDate) {
+		t.Fatalf("same version: got %v, want errUpToDate (exit 0, not a failure)", err)
 	}
 }

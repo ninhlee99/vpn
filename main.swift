@@ -237,6 +237,18 @@ final class VPNManager: ObservableObject {
                 detail: detail
             )
             message = "Session Stale: Tài khoản đang có phiên đăng nhập trên server."
+        } else if detail.contains("authenticator response") {
+            // The server accepted the login but could not prove it knows the
+            // password (MS-CHAPv2 S= check) — an impersonation signal, not a
+            // typo. Must precede the generic PPP_AUTH_FAILURE branch, which
+            // would tell the user to re-enter their password.
+            alert = VPNAlertInfo(
+                kind: .generic,
+                title: "Server Verification Failed",
+                message: "Máy chủ không chứng minh được danh tính (có thể bị giả mạo). Không nhập lại mật khẩu — hãy đổi mạng và báo quản trị.",
+                detail: detail
+            )
+            message = "Server Verification Failed: máy chủ có thể bị giả mạo."
         } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
             alert = VPNAlertInfo(
                 kind: .authFailed,

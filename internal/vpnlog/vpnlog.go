@@ -17,8 +17,11 @@ import (
 
 const Path = "/var/log/vpn.log"
 
-// RotatedPath keeps the previous log once Path outgrows maxSize, so the log
-// is bounded at roughly twice that without losing the most recent history.
+// RotatedPath keeps the previous log once Path outgrows maxSize. Rotation
+// happens when a connect starts (Init, the only moment this process is
+// root and may rename files in /var/log): a single session is not capped
+// mid-flight, but the log can no longer grow across sessions. Only
+// --verbose sessions write per-packet lines; normal ones log errors only.
 const RotatedPath = Path + ".1"
 
 const maxSize = 5 << 20 // 5 MiB
@@ -53,9 +56,7 @@ func Init(v bool) error {
 	return nil
 }
 
-// rotate moves path to rotated once it exceeds limit. Checked once per
-// process start (each connect is a fresh process), which is enough to keep
-// a long-lived install from growing the log without bound. Best effort: a
+// rotate moves path to rotated once it exceeds limit. Best effort: a
 // failure just means this run appends to the existing file.
 func rotate(path, rotated string, limit int64) {
 	if fi, err := os.Stat(path); err == nil && fi.Size() > limit {

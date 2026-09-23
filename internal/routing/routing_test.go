@@ -1,0 +1,47 @@
+package routing
+
+import (
+	"strings"
+	"testing"
+)
+
+// Watch must never remove a route it keeps alive: a delete, even one
+// immediately followed by an add, leaks traffic outside the tunnel.
+func TestReassertOnlyAdds(t *testing.T) {
+	s := &Snapshot{
+		DefaultGateway: "192.0.2.1",
+		VPNServerIP:    "203.0.113.7",
+		hostRouteAdded: true,
+		overrideAdded:  true,
+		tunIface:       "utun9",
+	}
+	cmds := s.reassertCommands()
+	if len(cmds) != 1+len(ipv4OverrideNets)+len(ipv6RejectNets) {
+		t.Fatalf("got %d commands, want every managed route: %q", len(cmds), cmds)
+	}
+	var joined []string
+	for _, c := range cmds {
+		if c[1] != "add" {
+			t.Fatalf("reassert issued a non-add command: %q", c)
+		}
+		joined = append(joined, strings.Join(c, " "))
+	}
+	all := strings.Join(joined, "\n")
+	for _, want := range []string{
+		"-n add -static -host 203.0.113.7 192.0.2.1",
+		"-n add -static -net 0.0.0.0/1 -interface utun9",
+		"-n add -static -net 128.0.0.0/1 -interface utun9",
+		"-n add -inet6 -net :: -prefixlen 1 ::1 -reject -static",
+		"-n add -inet6 -net 8000:: -prefixlen 1 ::1 -reject -static",
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %q in:\n%s", want, all)
+		}
+	}
+}
+
+func TestReassertNothingBeforeSetup(t *testing.T) {
+	if cmds := (&Snapshot{}).reassertCommands(); len(cmds) != 0 {
+		t.Fatalf("unconfigured snapshot reasserted %q", cmds)
+	}
+}
