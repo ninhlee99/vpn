@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -58,8 +59,9 @@ type Session struct {
 	Lifetime      time.Duration
 
 	dp             *dataPlane // set by StartDataPhase; from then on the reader owns the socket
-	mm1Retransmits int        // >0: MM1\'s retransmit budget, shortened when a fallback port follows
-	floated        bool       // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
+	mm1Retransmits int        // >0: MM1's retransmit budget, shortened when a fallback port follows
+	closeOnce      sync.Once
+	floated        bool // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
 }
 
 // nonESPMarker is RFC 3947 §3's 4 zero bytes prepended to every IKE (not
@@ -427,12 +429,13 @@ func (s *Session) logInformational(h Header, encBody []byte) {
 	}
 }
 
-// buildMM1 is Main Mode's first message, HDR, SA[, VID(NAT-T)] — shared by
+// buildMM1 is Main Mode's first message, HDR, SA, VID(DPD), VID(NAT-T) — shared by
 // the real exchange and ProbeResponder (probe.go) so a probe is exactly what connect
 // would send.
 func buildMM1(initiatorSPI [8]byte, sa []byte) []byte {
+	dpd := marshalPayload(PayloadVendorID, dpdVendorID)
 	vid := marshalPayload(PayloadNone, RFC3947VendorID())
-	body := append(marshalPayload(PayloadVendorID, sa), vid...)
+	body := append(append(marshalPayload(PayloadVendorID, sa), dpd...), vid...)
 	hdr := Header{InitiatorSPI: initiatorSPI, NextPayload: PayloadSA, Version: 0x10, ExchangeType: ExchangeIdentityProt}
 	hdr.Length = uint32(headerLen + len(body))
 	return append(hdr.Marshal(), body...)
