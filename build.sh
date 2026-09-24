@@ -39,6 +39,8 @@ mkdir -p "$BUILD_DIR/$APP_NAME/Contents/Resources"
 
 cp "$BUILD_DIR/$OUTPUT_NAME" "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS VPN"
 chmod +x "$BUILD_DIR/$APP_NAME/Contents/MacOS/TMS VPN"
+cp "assets/AppIcon.icns" "$BUILD_DIR/$APP_NAME/Contents/Resources/AppIcon.icns"
+cp "assets/logo.png" "$BUILD_DIR/$APP_NAME/Contents/Resources/Logo.png"
 
 cat <<EOF > "$BUILD_DIR/$APP_NAME/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -47,6 +49,8 @@ cat <<EOF > "$BUILD_DIR/$APP_NAME/Contents/Info.plist"
 <dict>
     <key>CFBundleExecutable</key>
     <string>TMS VPN</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.tms.vpn.menubar</string>
     <key>CFBundleName</key>

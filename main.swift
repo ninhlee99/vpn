@@ -1,6 +1,17 @@
 import Cocoa
 import SwiftUI
 
+// MARK: - Branding
+
+enum AppBranding {
+    // Bundled by build.sh into Contents/Resources/Logo.png so the popover header
+    // and the .app icon (assets/AppIcon.icns) stay the same artwork.
+    static let logo: NSImage? = {
+        guard let path = Bundle.main.path(forResource: "Logo", ofType: "png") else { return nil }
+        return NSImage(contentsOfFile: path)
+    }()
+}
+
 // MARK: - Models for CLI Config and State
 
 struct CLIAccount: Codable {
@@ -805,21 +816,18 @@ struct MacOSMenuBar: View {
         let state = vpn.linkState
         HStack(spacing: 0) {
             ZStack {
-                if state == .connected {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(VPNColors.green.opacity(0.14))
-                        .shadow(color: VPNColors.green.opacity(0.6), radius: 3)
-                        .transition(.opacity)
+                StatusBorder(state: .idle, cornerRadius: 6, idleColor: Color.white.opacity(0.15))
+
+                if let logo = AppBranding.logo {
+                    Image(nsImage: logo)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: 16, height: 16)
+                } else {
+                    Image(systemName: "shield")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(Color.white.opacity(0.85))
                 }
-
-                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15))
-
-                Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield"))
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(
-                        state == .connected ? VPNColors.green :
-                        (state == .connecting ? VPNColors.amber : Color.white.opacity(0.85))
-                    )
 
                 if state != .idle {
                     Circle()
@@ -991,31 +999,21 @@ struct MenuBarPopupView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
-                        .fill(
-                            state == .connected ? Color(red: 0.04, green: 0.18, blue: 0.12) :
-                            (state == .connecting ? Color(red: 0.2, green: 0.12, blue: 0.04) : Color(red: 0.05, green: 0.16, blue: 0.22))
-                        )
-                        .shadow(
-                            color: state == .connected ? VPNColors.green.opacity(0.35) : (state == .connecting ? VPNColors.amber.opacity(0.35) : Color(red: 0.08, green: 0.72, blue: 0.82).opacity(0.25)),
-                            radius: 8
-                        )
+                        .fill(Color(red: 0.05, green: 0.16, blue: 0.22))
+                        .shadow(color: Color(red: 0.08, green: 0.72, blue: 0.82).opacity(0.25), radius: 8)
 
-                    StatusBorder(state: state, cornerRadius: 12,
+                    StatusBorder(state: .idle, cornerRadius: 12,
                                  idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6))
 
-                    Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield.fill"))
-                        .font(.system(size: 20))
-                        .foregroundColor(
-                            state == .connected ? VPNColors.green :
-                            (state == .connecting ? VPNColors.amber : Color(red: 0.2, green: 0.75, blue: 0.95))
-                        )
-
-                    if state != .idle {
-                        Circle()
-                            .fill(state == .connected ? VPNColors.green : VPNColors.amber)
-                            .frame(width: 7, height: 7)
-                            .offset(x: 9, y: -9)
-                            .transition(.scale.combined(with: .opacity))
+                    if let logo = AppBranding.logo {
+                        Image(nsImage: logo)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 24, height: 24)
+                    } else {
+                        Image(systemName: "shield.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(Color(red: 0.2, green: 0.75, blue: 0.95))
                     }
                 }
                 .frame(width: 40, height: 40)
@@ -1080,18 +1078,6 @@ struct MenuBarPopupView: View {
                         }
                     }
                     Spacer()
-                    Button(action: { vpn.disconnect() }) {
-                        Text("Disconnect")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Color.red.opacity(0.9))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.red.opacity(0.12))
-                            )
-                    }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
