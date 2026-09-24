@@ -2,9 +2,12 @@ package ppp
 
 import (
 	"crypto/des"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"unicode/utf16"
 
 	"golang.org/x/crypto/md4" //nolint:staticcheck // MD4 is mandated by MS-CHAPv2 (RFC 2759) for the legacy NT password hash — not our choice, and not used for anything but interop with this specific auth protocol.
@@ -16,6 +19,12 @@ type MSCHAPv2Response struct {
 	PeerChallenge [16]byte
 	NTResponse    [24]byte
 	Flags         uint8 // always 0, RFC 2759 §8.1
+
+	// expectedAuthenticator is the 20-byte AuthenticatorResponse (RFC 2759
+	// §8.7) a genuine LNS must echo back as "S=<40 hex>" in its Success
+	// packet — never sent on the wire by us, only compared against the
+	// peer's claim by VerifySuccess.
+	expectedAuthenticator [20]byte
 }
 
 // GenerateMSCHAPv2Response computes the full response to an MS-CHAPv2
@@ -26,7 +35,13 @@ func GenerateMSCHAPv2Response(authenticatorChallenge []byte, username, password 
 	if _, err := rand.Read(peerChallenge[:]); err != nil {
 		return nil, fmt.Errorf("generate PeerChallenge: %w", err)
 	}
+	return generateMSCHAPv2Response(peerChallenge, authenticatorChallenge, username, password)
+}
 
+// generateMSCHAPv2Response is GenerateMSCHAPv2Response with the
+// PeerChallenge supplied by the caller, so the RFC 2759 §9.2 test vector can
+// exercise the exact production path.
+func generateMSCHAPv2Response(peerChallenge [16]byte, authenticatorChallenge []byte, username, password string) (*MSCHAPv2Response, error) {
 	challenge, err := challengeHash(peerChallenge[:], authenticatorChallenge, username)
 	if err != nil {
 		return nil, err
@@ -42,7 +57,53 @@ func GenerateMSCHAPv2Response(authenticatorChallenge []byte, username, password 
 
 	r := &MSCHAPv2Response{PeerChallenge: peerChallenge}
 	copy(r.NTResponse[:], ntResponse)
+	copy(r.expectedAuthenticator[:], authenticatorResponse(passwordHash, ntResponse, challenge))
 	return r, nil
+}
+
+// VerifySuccess checks the LNS's Success message (RFC 2759 §5: "S=<auth
+// string> M=<message>") against the AuthenticatorResponse this response
+// implies. Only a peer that knows the account's NT password hash can
+// produce it, so this is MS-CHAPv2's mutual-authentication step: without
+// it, anyone holding the (often shared) IPsec PSK could impersonate the
+// server and have this client treat the link as authenticated.
+func (r *MSCHAPv2Response) VerifySuccess(message []byte) error {
+	msg := string(message)
+	i := strings.Index(msg, "S=")
+	if i < 0 || len(msg) < i+2+40 {
+		return fmt.Errorf("MS-CHAPv2 Success message carries no authenticator response (S=)")
+	}
+	got, err := hex.DecodeString(msg[i+2 : i+2+40])
+	if err != nil {
+		return fmt.Errorf("MS-CHAPv2 Success message has a malformed authenticator response: %w", err)
+	}
+	if !hmac.Equal(got, r.expectedAuthenticator[:]) {
+		return fmt.Errorf("MS-CHAPv2 authenticator response mismatch — the peer does not know this account's password (possible server impersonation)")
+	}
+	return nil
+}
+
+// authenticatorResponse is RFC 2759 §8.7's GenerateAuthenticatorResponse,
+// returning the raw 20-byte digest (the wire form is its uppercase hex).
+func authenticatorResponse(passwordHash, ntResponse, challenge []byte) []byte {
+	magic1 := []byte("Magic server to client signing constant")
+	magic2 := []byte("Pad to make it do more than one iteration")
+
+	h4 := md4.New()
+	h4.Write(passwordHash)
+	passwordHashHash := h4.Sum(nil)
+
+	d := sha1.New()
+	d.Write(passwordHashHash)
+	d.Write(ntResponse)
+	d.Write(magic1)
+	digest := d.Sum(nil)
+
+	d = sha1.New()
+	d.Write(digest)
+	d.Write(challenge)
+	d.Write(magic2)
+	return d.Sum(nil)
 }
 
 // Marshal encodes the 49-byte Response field: PeerChallenge(16) |

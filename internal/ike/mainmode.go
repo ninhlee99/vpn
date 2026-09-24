@@ -1,7 +1,9 @@
 package ike
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"fmt"
 	"net"
@@ -152,7 +154,7 @@ func (s *Session) exchange(ctx context.Context, msg []byte, expectMinLen int) ([
 			got := buf[:n]
 			floatedMsg := from.Port == 4500
 			if floatedMsg {
-				if n < 4 || !bytesEqual(got[:4], nonESPMarker) {
+				if n < 4 || !bytes.Equal(got[:4], nonESPMarker) {
 					vpnlog.Debug(stage, "dropped :4500 packet missing non-ESP marker", vpnlog.Fields{"bytes": n})
 					continue
 				}
@@ -216,7 +218,7 @@ func (s *Session) RecvESP(ctx context.Context) ([]byte, error) {
 			continue
 		}
 		got := buf[:n]
-		if n >= 4 && bytesEqual(got[:4], nonESPMarker) {
+		if n >= 4 && bytes.Equal(got[:4], nonESPMarker) {
 			// An IKE control message (Informational/DPD) arrived
 			// interleaved with ESP traffic — handle and keep waiting.
 			if n >= 4+headerLen {
@@ -282,7 +284,7 @@ func (s *Session) exchangeQuickMode(msg []byte, msgID uint32) ([]byte, error) {
 			}
 			got := buf[:n]
 			if from.Port == 4500 {
-				if n < 4 || !bytesEqual(got[:4], nonESPMarker) {
+				if n < 4 || !bytes.Equal(got[:4], nonESPMarker) {
 					continue
 				}
 				got = got[4:]
@@ -338,7 +340,7 @@ func (s *Session) logInformational(h Header, encBody []byte) {
 	payloads, err := SplitPayloads(h.NextPayload, plain)
 	if err != nil {
 		vpnlog.Info(stage, "received Informational exchange (undecodable after decrypt)", vpnlog.Fields{
-			"next_payload": h.NextPayload, "plain_hex": fmt.Sprintf("%x", plain), "parse_err": err,
+			"next_payload": h.NextPayload, "plain_len": len(plain), "parse_err": err,
 		})
 		return
 	}
@@ -397,6 +399,12 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	chosen, err := ParseChosenTransform(chosenSABody)
 	if err != nil {
 		return fmt.Errorf("IKE_PROPOSAL_MISMATCH: %w", err)
+	}
+	// The responder may only pick one of our transforms. Main Mode's HASH_R
+	// covers the SA we offered (SAi_b), not this choice, so nothing later
+	// would catch a substituted one.
+	if !offeredIKE(chosen, transforms) {
+		return fmt.Errorf("IKE_PROPOSAL_MISMATCH: server chose a transform we never offered (encryption %d, %d-bit key, hash %d, group %d)", chosen.Encryption, cipherKeyLen(chosen)*8, chosen.Hash, chosen.Group)
 	}
 	s.Transform = chosen
 	vpnlog.Info(stage, "MM2 received (server chose transform)", vpnlog.Fields{
@@ -477,14 +485,17 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 
 	if peerSupportsNATT && len(peerNATDs) == 2 {
 		expectMine, _ := computeNATD(chosen.Hash, s.InitiatorSPI, s.ResponderSPI, cfg.LocalIP, 500)
-		matchMine := bytesEqual(expectMine, peerNATDs[1])
+		matchMine := bytes.Equal(expectMine, peerNATDs[1])
 		expectServer, _ := computeNATD(chosen.Hash, s.InitiatorSPI, s.ResponderSPI, s.serverIP, 500)
-		matchServer := bytesEqual(expectServer, peerNATDs[0])
+		matchServer := bytes.Equal(expectServer, peerNATDs[0])
 		s.NATDetected = !matchMine || !matchServer
 	}
 	vpnlog.Info(stage, "MM4 received", vpnlog.Fields{"nat_detected": s.NATDetected})
 
-	gxy := kp.SharedSecret(peerKE)
+	gxy, err := kp.SharedSecret(peerKE)
+	if err != nil {
+		return fmt.Errorf("MM4: %w", err)
+	}
 	keys, err := DerivePhase1Keys(chosen, []byte(cfg.PSK), ni, peerNonce, gxy, s.InitiatorSPI, s.ResponderSPI)
 	if err != nil {
 		return fmt.Errorf("derive Phase 1 keys: %w", err)
@@ -569,16 +580,11 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	if err != nil {
 		return err
 	}
-	if !bytesEqual(expectHashR, peerHash) {
+	if !hmac.Equal(expectHashR, peerHash) {
 		return fmt.Errorf("IKE_AUTH_FAILED: HASH_R mismatch (PSK likely incorrect)")
 	}
-	if cfg.ServerID != "" {
-		pid, err := ParseID(peerIDBody)
-		if err == nil && pid.Type == IDTypeIPv4Addr {
-			if net.IP(pid.Data).String() != cfg.ServerID {
-				return fmt.Errorf("server identified itself as %s, expected %s (set server_id to match, or leave empty to accept any)", net.IP(pid.Data).String(), cfg.ServerID)
-			}
-		}
+	if err := checkServerID(cfg.ServerID, peerIDBody); err != nil {
+		return err
 	}
 
 	s.nextMsgID = 0
@@ -622,16 +628,33 @@ func informationalIV(hashAlg int, lastPhase1IV []byte, messageID uint32, blockLe
 	return seed[:blockLen], nil
 }
 
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+// offeredIKE reports whether a Phase 1 choice matches one of our offers.
+func offeredIKE(chosen Transform, offered []Transform) bool {
+	for _, o := range offered {
+		if o.Encryption == chosen.Encryption && cipherKeyLen(o) == cipherKeyLen(chosen) &&
+			o.Hash == chosen.Hash && o.Group == chosen.Group && o.AuthMethod == chosen.AuthMethod {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// checkServerID enforces the profile's server_id against the responder's
+// (HASH_R-authenticated) ID payload. Empty want accepts any identity. Every
+// ID type is compared — an identity type this client doesn't recognize, or
+// an unparsable payload, is a mismatch rather than a silent pass.
+func checkServerID(want string, peerIDBody []byte) error {
+	if want == "" {
+		return nil
+	}
+	pid, err := ParseID(peerIDBody)
+	if err != nil {
+		return fmt.Errorf("IKE_AUTH_FAILED: parse server ID payload: %w", err)
+	}
+	if got := pid.String(); got != want {
+		return fmt.Errorf("IKE_AUTH_FAILED: server identified itself as %s, expected %s (set server_id to match, or leave empty to accept any)", got, want)
+	}
+	return nil
 }
 
 // payloadNATD is RFC 3947 §5's NAT-D payload type, registered as ISAKMP

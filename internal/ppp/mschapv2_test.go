@@ -46,6 +46,40 @@ func TestMSCHAPv2RFC2759Vector(t *testing.T) {
 	}
 }
 
+// RFC 2759 §9.2 AuthenticatorResponse for the same inputs as above, run
+// through the production path (generateMSCHAPv2Response + VerifySuccess).
+func TestMSCHAPv2AuthenticatorResponseRFC2759Vector(t *testing.T) {
+	var peerChallenge [16]byte
+	copy(peerChallenge[:], mustHex(t, "21402324255E262A28295F2B3A337C7E"))
+	authenticatorChallenge := mustHex(t, "5B5D7C7D7B3F2F3E3C2C602132262628")
+
+	r, err := generateMSCHAPv2Response(peerChallenge, authenticatorChallenge, "User", "clientPass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := mustHex(t, "407A5589115FD0D6209F510FE9C04566932CDA56"); !bytes.Equal(r.expectedAuthenticator[:], want) {
+		t.Fatalf("AuthenticatorResponse: got %X want %X", r.expectedAuthenticator, want)
+	}
+
+	if err := r.VerifySuccess([]byte("S=407A5589115FD0D6209F510FE9C04566932CDA56 M=Access granted")); err != nil {
+		t.Fatalf("genuine Success rejected: %v", err)
+	}
+	if err := r.VerifySuccess([]byte("S=407a5589115fd0d6209f510fe9c04566932cda56")); err != nil {
+		t.Fatalf("lowercase hex Success rejected: %v", err)
+	}
+	for _, bad := range []string{
+		"",
+		"M=Access granted",
+		"S=0000000000000000000000000000000000000000 M=Access granted",
+		"S=407A5589115FD0D6209F510FE9C0456693",
+		"S=ZZ7A5589115FD0D6209F510FE9C04566932CDA56",
+	} {
+		if err := r.VerifySuccess([]byte(bad)); err == nil {
+			t.Fatalf("forged Success %q accepted", bad)
+		}
+	}
+}
+
 func mustHex(t *testing.T, s string) []byte {
 	t.Helper()
 	clean := make([]byte, 0, len(s))

@@ -107,10 +107,32 @@ func (k *KeyPair) PublicBytes() []byte {
 }
 
 // SharedSecret computes g^(a*b) mod p from the peer's public KE value.
-func (k *KeyPair) SharedSecret(peerPublic []byte) []byte {
+//
+// The peer's value is validated first (RFC 2631 §2.1.5): 0, 1 and p-1 all
+// produce a shared secret the peer can predict without knowing its own
+// private exponent, and anything >= p is outside the group. Without this
+// check a malicious responder could force a known g^xy — the PSK still has
+// to match for HASH_R to verify, so this is not remotely exploitable on its
+// own, but key agreement must not silently accept a degenerate value.
+func (k *KeyPair) SharedSecret(peerPublic []byte) ([]byte, error) {
+	size := k.Group.BitLen / 8
+	// RFC 2409 §5 says the value MUST be zero-padded to the group size, but
+	// a peer that drops a leading zero byte (1 in 256 values) would
+	// otherwise fail at random; a shorter value is the same integer, and
+	// the range check below is what actually guards the key agreement.
+	if len(peerPublic) > size {
+		return nil, fmt.Errorf("peer KE payload is %d bytes, more than the %d of DH group %d", len(peerPublic), size, k.Group.ID)
+	}
 	peer := new(big.Int).SetBytes(peerPublic)
+	pMinus1 := new(big.Int).Sub(k.Group.Prime, big.NewInt(1))
+	if peer.Cmp(big.NewInt(1)) <= 0 || peer.Cmp(pMinus1) >= 0 {
+		return nil, fmt.Errorf("peer KE value is outside [2, p-2] for DH group %d", k.Group.ID)
+	}
 	shared := new(big.Int).Exp(peer, k.Private, k.Group.Prime)
-	return leftPad(shared.Bytes(), k.Group.BitLen/8)
+	if shared.Cmp(big.NewInt(1)) <= 0 || shared.Cmp(pMinus1) >= 0 {
+		return nil, fmt.Errorf("DH shared secret is degenerate for group %d", k.Group.ID)
+	}
+	return leftPad(shared.Bytes(), size), nil
 }
 
 func leftPad(b []byte, size int) []byte {

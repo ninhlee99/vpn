@@ -1,0 +1,101 @@
+// Command releasesign produces the signed release manifest `vpn update`
+// verifies (see internal/release).
+//
+//	releasesign keygen
+//	    prints a fresh base64 seed (the RELEASE_SIGNING_KEY secret) on stdout
+//	    and its public key (for release.PublicKey) on stderr.
+//	releasesign sign -version vX.Y.Z -out DIR ASSET...
+//	    reads the base64 seed from $RELEASE_SIGNING_KEY and writes
+//	    DIR/SHA256SUMS and DIR/SHA256SUMS.sig covering every ASSET.
+package main
+
+import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"vpn/internal/release"
+)
+
+func main() {
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "releasesign:", err)
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: releasesign <keygen|sign> ...")
+	}
+	switch args[0] {
+	case "keygen":
+		return keygen()
+	case "sign":
+		return sign(args[1:])
+	default:
+		return fmt.Errorf("unknown subcommand %q", args[0])
+	}
+}
+
+func keygen() error {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return err
+	}
+	fmt.Println(base64.StdEncoding.EncodeToString(priv.Seed()))
+	fmt.Fprintln(os.Stderr, "public key:", base64.StdEncoding.EncodeToString(pub))
+	return nil
+}
+
+func sign(args []string) error {
+	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
+	version := fs.String("version", "", "release tag, vX.Y.Z")
+	outDir := fs.String("out", ".", "directory to write the manifest and signature into")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if _, ok := release.ParseSemver(*version); !ok {
+		return fmt.Errorf("-version must be a vX.Y.Z tag, got %q", *version)
+	}
+	if fs.NArg() == 0 {
+		return fmt.Errorf("no assets given")
+	}
+	seed, err := base64.StdEncoding.DecodeString(os.Getenv("RELEASE_SIGNING_KEY"))
+	if err != nil {
+		return fmt.Errorf("decode $RELEASE_SIGNING_KEY: %w", err)
+	}
+
+	names := make([]string, 0, fs.NArg())
+	digests := map[string]string{}
+	for _, path := range fs.Args() {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(data)
+		name := filepath.Base(path)
+		names = append(names, name)
+		digests[name] = hex.EncodeToString(sum[:])
+	}
+	manifest := release.Format(*version, names, digests)
+	sig, err := release.Sign(seed, manifest)
+	if err != nil {
+		return err
+	}
+	// Refuse to publish anything the shipped binaries would then reject
+	// (e.g. the secret holding a key other than release.PublicKey).
+	if _, err := release.Verify(manifest, sig); err != nil {
+		return fmt.Errorf("signing key does not match release.PublicKey: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(*outDir, release.ManifestName), manifest, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(*outDir, release.SignatureName), sig, 0o644)
+}

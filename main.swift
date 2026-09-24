@@ -261,7 +261,19 @@ final class VPNManager: ObservableObject {
 
         let alert: VPNAlertInfo
         let message: String
-        if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
+        if detail.contains("authenticator response") {
+            // The server accepted the login but could not prove it knows the
+            // password (MS-CHAPv2 S= check) — an impersonation signal, not a
+            // typo. Must precede the generic PPP_AUTH_FAILURE branch, which
+            // would tell the user to re-enter their password.
+            alert = VPNAlertInfo(
+                kind: .generic,
+                title: "Server Verification Failed",
+                message: "Máy chủ không chứng minh được danh tính (có thể bị giả mạo). Không nhập lại mật khẩu — hãy đổi mạng và báo quản trị.",
+                detail: detail
+            )
+            message = "Server Verification Failed: máy chủ có thể bị giả mạo."
+        } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
             alert = VPNAlertInfo(
                 kind: .authFailed,
                 title: "Authentication Failed",
@@ -387,11 +399,29 @@ final class VPNManager: ObservableObject {
         syncFromDisk()
     }
 
-    nonisolated private static func run(_ path: String, _ args: [String]) {
+    /// `secret`, when given, goes to the CLI's stdin — never into `args`: the argv of a
+    /// running process is visible to every local user via `ps`, and the CLI's secret prompt
+    /// reads one line from stdin when it isn't a terminal. An empty secret sends nothing, so
+    /// the CLI sees EOF and refuses, exactly as it did for an empty `--psk`/`--password`.
+    nonisolated private static func run(_ path: String, _ args: [String], secret: String? = nil) {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: path)
         p.arguments = args
-        try? p.run()
+        let input = Pipe()
+        if secret != nil {
+            p.standardInput = input
+        }
+        do {
+            try p.run()
+        } catch {
+            return
+        }
+        if let secret = secret {
+            if !secret.isEmpty {
+                input.fileHandleForWriting.write(Data((secret + "\n").utf8))
+            }
+            try? input.fileHandleForWriting.close()
+        }
         p.waitUntilExit()
     }
 
@@ -488,12 +518,11 @@ final class VPNManager: ObservableObject {
     func saveProfile(name: String, server: String, user: String, psk: String, password: String, isFullTunnel: Bool, isNew: Bool) {
         let cli = self.cli
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var args = ["profile", "add", name, "--server", server, "--psk", psk]
-            args.append("--full-tunnel=\(isFullTunnel)")
-            Self.run(cli, args)
+            let args = ["profile", "add", name, "--server", server, "--full-tunnel=\(isFullTunnel)"]
+            Self.run(cli, args, secret: psk)
 
             if !user.isEmpty {
-                Self.run(cli, ["account", "add", name, user, "--password", password, "--default"])
+                Self.run(cli, ["account", "add", name, user, "--default"], secret: password)
             }
 
             Task { @MainActor in self?.syncFromDisk() }

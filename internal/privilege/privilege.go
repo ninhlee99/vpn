@@ -39,9 +39,10 @@ var realUID = os.Getuid()
 const OwnerFile = "/etc/vpn-owner-uid"
 
 // CheckOwner enforces that only the user who installed this binary (i.e.
-// ran install.sh) can run it at all — missing OwnerFile means "not
-// installed via install.sh" (a plain dev build), which skips the check
-// entirely. This exists because installing setuid-root makes the binary
+// ran install.sh) can run it at all. A setuid-root binary with no OwnerFile
+// is refused rather than let through: that state means an incomplete or
+// tampered install, and treating it as "no restriction" would hand root
+// capabilities to every local account. This exists because installing setuid-root makes the binary
 // executable (and, without this check, root-capable) for *every* local
 // account on the machine, not just the person who ran install.sh — call
 // this as the very first thing in main(), before Drop or any subcommand
@@ -57,7 +58,7 @@ func CheckOwner() error {
 	}
 	data, err := os.ReadFile(OwnerFile)
 	if os.IsNotExist(err) {
-		return nil
+		return fmt.Errorf("%s is missing, so this setuid-root vpn binary cannot tell who installed it — reinstall with install.sh", OwnerFile)
 	}
 	if err != nil {
 		return fmt.Errorf("read %s: %w", OwnerFile, err)

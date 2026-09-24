@@ -1,112 +1,90 @@
 name: release
 
-# Builds vpn-darwin-arm64/amd64 (Linux runner, pure Go cross-compile) and
-# TMS VPN.app (macOS runner — Swift/AppKit/SwiftUI need a real Apple
-# toolchain, unlike the Go CLI) on every push to main, and publishes them
-# together as assets on a new immutable GitHub Release per commit.
-# install.sh and `vpn update` use releases/latest/download, so they still
-# resolve newest published release without a mutable `latest` tag.
+# Publishes a release only for a pushed semver tag (vX.Y.Z), and only after
+# the test workflow passes on that exact commit. One macOS job builds
+# everything — the Go CLI cross-compiles for both architectures anywhere,
+# but TMS VPN.app needs Apple's Swift toolchain — so the manifest below can
+# cover every asset in a single place.
+#
+# Each release carries vpn-darwin-arm64, vpn-darwin-amd64, TMS-VPN.app.zip
+# plus SHA256SUMS and its ed25519 signature SHA256SUMS.sig (see
+# internal/release). `vpn update` refuses a release whose signature does not
+# verify against the key compiled into the installed binary.
+#
+# Requires the RELEASE_SIGNING_KEY secret: base64 ed25519 seed from
+# `go run ./cmd/releasesign keygen`, matching release.PublicKey.
 on:
   push:
-    branches: [main]
-  workflow_dispatch: {}
+    tags: ["v*.*.*"]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  build-cli:
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.vars.outputs.version }}
-      release_tag: ${{ steps.vars.outputs.release_tag }}
+  test:
+    uses: ./.github/workflows/test.yml
+
+  release:
+    needs: test
+    runs-on: macos-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      # Third-party code is pinned by commit SHA, not a movable tag.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # so `git describe` sees tags/history for the version string
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.27"
+          go-version-file: go.mod
 
-      - name: Compute version/tag
-        id: vars
+      - name: Validate tag
         run: |
-          VERSION="$(git describe --tags --always --dirty)"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # A rerun needs a fresh tag too: published immutable releases cannot
-          # accept replacement assets. Shared with build-app below so both
-          # jobs' assets land on the same release.
-          echo "release_tag=build-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
 
-      - name: Build
+      - name: Build CLI
         run: |
           for arch in arm64 amd64; do
             CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go build -trimpath \
-              -ldflags "-s -w -X main.version=${{ steps.vars.outputs.version }}" \
+              -ldflags "-s -w -X main.version=$GITHUB_REF_NAME" \
               -o "vpn-darwin-$arch" ./cmd/vpn
           done
-
-      # Immutable releases only accept assets while draft. A unique tag also
-      # prevents this action from replacing files on an existing release.
-      # build-app (below) uploads TMS-VPN.app.zip to this same draft release
-      # before either job marks it published — see the publish job.
-      - name: Create draft release and upload CLI binaries
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.vars.outputs.release_tag }}
-          target_commitish: ${{ github.sha }}
-          name: ${{ steps.vars.outputs.version }}
-          draft: true
-          body: Automatically built from ${{ github.sha }}.
-          files: |
-            vpn-darwin-arm64
-            vpn-darwin-amd64
-
-  build-app:
-    needs: build-cli
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
 
       - name: Build TMS VPN.app (universal — arm64 + Intel)
         run: bash build.sh
 
       # ditto (not plain zip) preserves the bundle's resource forks/extended
       # attributes correctly — Apple's own documented way to zip an .app.
-      # The zip's own outer filename stays hyphenated (unlike the bundle
-      # inside it) purely so install.sh's curl URL never needs to carry an
-      # encoded space — the space in "TMS VPN.app" survives fine as an
-      # *entry name inside* the archive, which is all --keepParent needs.
+      # The zip's outer filename stays hyphenated so install URLs never need
+      # an encoded space; the space in "TMS VPN.app" survives as an entry
+      # name inside the archive.
       - name: Zip the app bundle
         run: ditto -c -k --sequesterRsrc --keepParent "build/TMS VPN.app" TMS-VPN.app.zip
 
-      # The release already exists (created as a draft by build-cli) — this
-      # just adds another asset to it, still while draft, so the final
-      # publish step below sees both the CLI binaries and the app together.
-      - name: Upload app bundle to the same draft release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.build-cli.outputs.release_tag }}
-          # Explicit, not relied-on-as-default: stays draft until the
-          # `publish` job (which waits on both this job and build-cli)
-          # flips it — see build-cli's identical comment on why order
-          # matters here.
-          draft: true
-          files: TMS-VPN.app.zip
+      - name: Sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          go run ./cmd/releasesign sign -version "$GITHUB_REF_NAME" -out . \
+            vpn-darwin-arm64 vpn-darwin-amd64 TMS-VPN.app.zip
 
-  publish:
-    needs: [build-cli, build-app]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish release as latest
+      # gh is preinstalled on GitHub runners — no third-party release action.
+      # Immutable releases only accept assets while draft, so upload into a
+      # draft first, then publish it as latest.
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        # Only now, once both the CLI binaries and TMS-VPN.app.zip are
-        # uploaded — the release is immutable once published, so publishing
-        # any earlier would strand whichever asset lost the race.
-        run: gh release edit "${{ needs.build-cli.outputs.release_tag }}" --draft=false --latest --repo "${{ github.repository }}"
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            vpn-darwin-arm64 vpn-darwin-amd64 TMS-VPN.app.zip SHA256SUMS SHA256SUMS.sig \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes "Built from ${GITHUB_SHA}. SHA256SUMS is signed with ed25519 (SHA256SUMS.sig)."
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -332,7 +332,7 @@ final class VPNService: ObservableObject {
     }
 
     private func connectL2TP(_ profile: L2TPProfile) {
-        // Gọi backend ninhlee99/vpn hoặc scutil / pppd L2TP native
+        // Calls the tms-ninhle/vpn backend, or native scutil / pppd L2TP
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
         process.arguments = ["connect", profile.serverAddress]

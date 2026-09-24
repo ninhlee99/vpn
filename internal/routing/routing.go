@@ -11,15 +11,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-)
 
-// Absolute paths, not just "route"/"ifconfig" — routing.go's callers run
-// under privilege.Elevate (effective root), and a bare command name would
-// be resolved via $PATH, which a local non-root user fully controls —
-// classic setuid PATH hijacking.
-const (
-	routeBin    = "/sbin/route"
-	ifconfigBin = "/sbin/ifconfig"
+	"vpn/internal/sysbin"
 )
 
 // Snapshot is the pre-VPN routing state, captured once before any change so
@@ -33,10 +26,24 @@ type Snapshot struct {
 	tunIface         string
 }
 
+// ipv4OverrideNets are the split-default halves that steer all IPv4 traffic
+// into the tunnel (see ApplyFullTunnel).
+var ipv4OverrideNets = []string{"0.0.0.0/1", "128.0.0.0/1"}
+
+// ipv6RejectNets are the same split-default trick for IPv6, pointed at a
+// -reject route instead of the tunnel: the LNS never negotiates IPV6CP, so
+// the tunnel cannot carry IPv6 — but without these, any IPv6-capable
+// network would keep sending IPv6 traffic straight out the physical
+// interface, bypassing the VPN entirely. -reject (ICMP unreachable) rather
+// than -blackhole so dual-stack clients fail over to IPv4 immediately
+// instead of timing out. Link-local and on-link LAN prefixes stay reachable
+// because their routes are more specific than /1, just like the IPv4 LAN.
+var ipv6RejectNets = []string{"::", "8000::"}
+
 // Capture reads the current default route. It must be called before any
 // other function in this package changes anything.
 func Capture() (*Snapshot, error) {
-	out, err := exec.Command(routeBin, "-n", "get", "default").Output()
+	out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output()
 	if err != nil {
 		return nil, fmt.Errorf("read default route: %w", err)
 	}
@@ -75,8 +82,8 @@ func (s *Snapshot) ProtectServer(serverIP string) error {
 	s.VPNServerIP = serverIP
 	// Idempotent: delete-then-add so re-running connect after a crash
 	// doesn't fail on "route already exists".
-	_ = exec.Command(routeBin, "-n", "delete", "-host", serverIP).Run()
-	cmd := exec.Command(routeBin, "-n", "add", "-static", "-host", serverIP, s.DefaultGateway)
+	_ = exec.Command(sysbin.Route, "-n", "delete", "-host", serverIP).Run()
+	cmd := exec.Command(sysbin.Route, s.serverRouteAddArgs()...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("add host route to VPN server via %s: %w (%s)", s.DefaultGateway, err, strings.TrimSpace(string(out)))
 	}
@@ -97,7 +104,7 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 		args = append(args, "mtu", fmt.Sprintf("%d", mtu))
 	}
 	args = append(args, "up")
-	if out, err := exec.Command(ifconfigBin, args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(sysbin.Ifconfig, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("configure %s (%s -> %s): %w (%s)", iface, local, peer, err, strings.TrimSpace(string(out)))
 	}
 	return nil
@@ -106,23 +113,83 @@ func ConfigureP2PInterface(iface, local, peer string, mtu int) error {
 // ApplyFullTunnel routes all IPv4 traffic through the tunnel interface using
 // the standard 0.0.0.0/1 + 128.0.0.0/1 split-default trick: two more-specific
 // routes outrank the existing default without deleting it, so Restore can
-// cleanly remove just the two overrides.
-// Idempotent (delete-then-add, like ProtectServer): callers may re-invoke
-// this periodically for the life of the connection — macOS's own network
-// reconciliation (IPMonitor) can silently reap these routes even with
-// -static, so simply adding them once at connect time isn't reliable for a
-// long-lived session (see Watch).
+// cleanly remove just the two overrides. It also rejects global IPv6 the
+// same way (see ipv6RejectNets), since the tunnel carries IPv4 only.
+// Idempotent (delete-then-add, like ProtectServer), so it replaces stale
+// routes left by a crashed run. macOS's own network reconciliation
+// (IPMonitor) can silently reap these routes even with -static, so Watch
+// keeps them in place for the life of the connection — via reassert, which
+// only re-adds, never deletes.
 func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	s.tunIface = tunIface
-	for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		_ = exec.Command(routeBin, "-n", "delete", "-net", net).Run()
-		cmd := exec.Command(routeBin, "-n", "add", "-static", "-net", net, "-interface", tunIface)
+	// Set before the first add, so a partial failure still lets Restore
+	// remove whatever did get installed (every removal tolerates "not in
+	// table").
+	s.overrideAdded = true
+	for _, net := range ipv4OverrideNets {
+		_ = exec.Command(sysbin.Route, "-n", "delete", "-net", net).Run()
+		cmd := exec.Command(sysbin.Route, ipv4OverrideAddArgs(net, tunIface)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("add override route %s via %s: %w (%s)", net, tunIface, err, strings.TrimSpace(string(out)))
 		}
 	}
-	s.overrideAdded = true
+	for _, net := range ipv6RejectNets {
+		_ = exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).Run()
+		cmd := exec.Command(sysbin.Route, ipv6RejectAddArgs(net)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("add IPv6 reject route %s/1: %w (%s)", net, err, strings.TrimSpace(string(out)))
+		}
+	}
 	return nil
+}
+
+// ipv6RouteArgs is the `route` argv prefix addressing one IPv6 /1 half.
+func ipv6RouteArgs(verb, net string) []string {
+	return []string{"-n", verb, "-inet6", "-net", net, "-prefixlen", "1"}
+}
+
+func ipv6RejectAddArgs(net string) []string {
+	return append(ipv6RouteArgs("add", net), "::1", "-reject", "-static")
+}
+
+func ipv4OverrideAddArgs(net, tunIface string) []string {
+	return []string{"-n", "add", "-static", "-net", net, "-interface", tunIface}
+}
+
+func (s *Snapshot) serverRouteAddArgs() []string {
+	return []string{"-n", "add", "-static", "-host", s.VPNServerIP, s.DefaultGateway}
+}
+
+// reassert re-adds whichever of this snapshot's routes macOS has reaped and
+// leaves the ones still present untouched. Unlike ProtectServer and
+// ApplyFullTunnel — delete-then-add, which setup needs to replace stale
+// routes left by a crashed run — it never opens a window in which a route
+// is absent: for the overrides that window would send traffic, IPv6
+// included, straight out the physical interface every Watch tick.
+func (s *Snapshot) reassert() {
+	for _, args := range s.reassertCommands() {
+		// "File exists" just means the route is still in place; any
+		// other failure is retried on the next tick.
+		_ = exec.Command(sysbin.Route, args...).Run()
+	}
+}
+
+// reassertCommands lists the `route add` argv reassert issues — add-only by
+// construction.
+func (s *Snapshot) reassertCommands() [][]string {
+	var adds [][]string
+	if s.hostRouteAdded && s.VPNServerIP != "" {
+		adds = append(adds, s.serverRouteAddArgs())
+	}
+	if s.overrideAdded && s.tunIface != "" {
+		for _, net := range ipv4OverrideNets {
+			adds = append(adds, ipv4OverrideAddArgs(net, s.tunIface))
+		}
+		for _, net := range ipv6RejectNets {
+			adds = append(adds, ipv6RejectAddArgs(net))
+		}
+	}
+	return adds
 }
 
 // Watch periodically re-asserts ProtectServer (and ApplyFullTunnel, if it
@@ -147,12 +214,7 @@ func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, 
 			return
 		case <-ticker.C:
 			_ = elevate(func() error {
-				if s.hostRouteAdded && s.VPNServerIP != "" {
-					_ = s.ProtectServer(s.VPNServerIP)
-				}
-				if s.overrideAdded && s.tunIface != "" {
-					_ = s.ApplyFullTunnel(s.tunIface)
-				}
+				s.reassert()
 				return nil
 			})
 		}
@@ -166,14 +228,19 @@ func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, 
 func (s *Snapshot) Restore() error {
 	var errs []string
 	if s.overrideAdded {
-		for _, net := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-			if out, err := exec.Command(routeBin, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+		for _, net := range ipv4OverrideNets {
+			if out, err := exec.Command(sysbin.Route, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove override route %s: %v (%s)", net, err, strings.TrimSpace(string(out))))
+			}
+		}
+		for _, net := range ipv6RejectNets {
+			if out, err := exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+				errs = append(errs, fmt.Sprintf("remove IPv6 reject route %s/1: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
 		}
 	}
 	if s.hostRouteAdded && s.VPNServerIP != "" {
-		if out, err := exec.Command(routeBin, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+		if out, err := exec.Command(sysbin.Route, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 			errs = append(errs, fmt.Sprintf("remove VPN server host route: %v (%s)", err, strings.TrimSpace(string(out))))
 		}
 	}

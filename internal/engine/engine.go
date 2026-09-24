@@ -24,6 +24,7 @@ import (
 	"vpn/internal/privilege"
 	"vpn/internal/routing"
 	"vpn/internal/state"
+	"vpn/internal/sysbin"
 	"vpn/internal/tun"
 	"vpn/internal/vpnlog"
 )
@@ -143,6 +144,9 @@ func Connect(cfg Config) error {
 		}
 
 		var err error
+		if err := ike.ValidateESPProposals(cfg.ESPProposals); err != nil {
+			return fail("IPSEC_FAILURE", "invalid ESP proposal in profile", err)
+		}
 		rtSnapshot, err = routing.Capture()
 		if err != nil {
 			return fail("ROUTE_FAILURE", "capture current routing state", err)
@@ -184,10 +188,20 @@ func Connect(cfg Config) error {
 		}
 		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
 
+		outSA, err := newESPSA(qm.Outbound)
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IPSEC_FAILURE", "set up outbound ESP SA", err)
+		}
+		inSA, err := newESPSA(qm.Inbound)
+		if err != nil {
+			_ = rtSnapshot.Restore()
+			return fail("IPSEC_FAILURE", "set up inbound ESP SA", err)
+		}
 		espT := &espTransport{
 			sess: sess,
-			out:  &ipsec.SA{SPI: qm.Outbound.SPI, EncKey: qm.Outbound.EncKey, AuthKey: qm.Outbound.AuthKey},
-			in:   &ipsec.SA{SPI: qm.Inbound.SPI, EncKey: qm.Inbound.EncKey, AuthKey: qm.Inbound.AuthKey},
+			out:  outSA,
+			in:   inSA,
 			repairRoute: func() error {
 				return privilege.Elevate(func() error {
 					return rtSnapshot.ProtectServer(serverIP.String())
@@ -282,6 +296,14 @@ func Connect(cfg Config) error {
 			st.DNSServers = snap.Servers
 			st.DNSApplied = true
 			vpnlog.Info("ENGINE", "DNS applied", vpnlog.Fields{"service": service, "servers": dnsServers})
+		} else if cfg.FullTunnel {
+			// Not an error — some LNSes simply don't push DNS — but the
+			// system keeps its current resolvers, and one on the local
+			// network (e.g. the Wi-Fi router) is reached via its on-link
+			// route, outside the tunnel: every lookup is visible to that
+			// network.
+			st.Warnings = append(st.Warnings, warnNoPushedDNS)
+			vpnlog.Error("ENGINE", warnNoPushedDNS, nil)
 		}
 
 		st.Phase = state.PhaseConnected
@@ -325,16 +347,56 @@ func Connect(cfg Config) error {
 			_ = dnsSnap.Restore()
 		}
 		_ = rtSnapshot.Restore()
-		_ = state.Clear()
 
 		if pumpErr != nil && sigCtx.Err() == nil {
-			// Stopped for a reason other than the signal we were waiting for.
-			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr})
+			// Stopped for a reason other than the signal we were waiting
+			// for. The tunnel fails open (routes/DNS restored above), so
+			// record that loudly for `vpn status` instead of looking like
+			// an ordinary disconnect.
+			failed := &state.State{
+				Phase:      state.PhaseFailed,
+				Profile:    cfg.ProfileName,
+				Account:    cfg.AccountName,
+				Server:     cfg.Server,
+				FailStage:  "TUNNEL_FAILURE",
+				FailDetail: fmt.Sprintf("tunnel dropped (%v) — traffic now goes over the normal network WITHOUT VPN protection; run `vpn connect` again", pumpErr),
+			}
+			_ = failed.Save()
+			vpnlog.Error("ENGINE", "data plane stopped unexpectedly; traffic now bypasses the VPN", vpnlog.Fields{"err": pumpErr})
 			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
 		}
+		_ = state.Clear()
 		vpnlog.Info("ENGINE", "disconnected", nil)
 		return nil
 	})
+}
+
+// warnNoPushedDNS is surfaced by connect/status when the LNS assigned no DNS
+// servers under full tunnel (see Connect).
+const warnNoPushedDNS = "VPN server pushed no DNS servers: DNS lookups keep using this network's resolvers, and any on the local network bypass the VPN"
+
+// newESPSA turns one direction of Quick Mode's result into the data-plane
+// SA for exactly the transform that was negotiated.
+func newESPSA(c ike.ChildSA) (*ipsec.SA, error) {
+	var cipher ipsec.Cipher
+	switch c.Transform.Encryption {
+	case ike.Enc3DES:
+		cipher = ipsec.Cipher3DESCBC
+	case ike.EncAES:
+		cipher = ipsec.CipherAESCBC
+	default:
+		return nil, fmt.Errorf("negotiated ESP encryption %d has no data-plane implementation", c.Transform.Encryption)
+	}
+	var integrity ipsec.Integrity
+	switch c.Transform.Hash {
+	case ike.HashSHA1:
+		integrity = ipsec.IntegHMACSHA1_96
+	case ike.HashSHA256:
+		integrity = ipsec.IntegHMACSHA256_128
+	default:
+		return nil, fmt.Errorf("negotiated ESP integrity %d has no data-plane implementation", c.Transform.Hash)
+	}
+	return ipsec.NewSA(c.SPI, cipher, integrity, c.EncKey, c.AuthKey)
 }
 
 // dnsServerStrings collects the LNS-provided DNS servers as strings,
@@ -369,7 +431,9 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error
 				}
 				return
 			}
-			if n == 0 {
+			// Only IPv4 is negotiated (IPCP, never IPV6CP): framing any
+			// other packet as ppp.ProtoIP would hand the LNS garbage.
+			if n == 0 || buf[0]>>4 != 4 {
 				continue
 			}
 			if err := pppT.SendFrame(ppp.ProtoIP, buf[:n]); err != nil {
@@ -666,13 +730,8 @@ func resolveServer(host string) (net.IP, error) {
 	return ips[0], nil
 }
 
-// ifconfigBin: absolute path, not bare "ifconfig" — same PATH-hijack
-// concern as routing.go/dnsmgr.go/keychain.go (this runs while
-// privilege.Elevate is raised, inside Connect's setup phase).
-const ifconfigBin = "/sbin/ifconfig"
-
 func localOutboundIP(iface string) net.IP {
-	out, err := exec.Command(ifconfigBin, iface).Output()
+	out, err := exec.Command(sysbin.Ifconfig, iface).Output()
 	if err != nil {
 		return nil
 	}

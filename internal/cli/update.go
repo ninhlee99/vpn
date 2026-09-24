@@ -1,32 +1,82 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"vpn/internal/privilege"
+	"vpn/internal/release"
 )
 
-// releaseAssetBaseURL is where CI publishes prebuilt binaries — see
-// .github/workflows/release.yml, which names each one vpn-darwin-<GOARCH>.
-const releaseAssetBaseURL = "https://github.com/ninhlee99/vpn/releases/latest/download/"
+// releaseAssetBaseURL is where CI publishes prebuilt binaries plus the
+// signed manifest — see .github/workflows/release.yml and internal/release.
+const releaseAssetBaseURL = "https://github.com/tms-ninhle/vpn/releases/latest/download/"
+
+const (
+	installPath = "/usr/local/bin/vpn"
+	// stagingDir is root-owned and not writable by anyone else, so the
+	// candidate binary run for its `version` sanity check below cannot be
+	// swapped by an unprivileged process between that check and install.
+	stagingDir = "/var/run/vpn/update"
+	// maxDownload caps every fetched asset; a release binary is ~5 MB.
+	maxDownload = 64 << 20
+)
 
 func cmdUpdate(args []string) error {
-	buildOut, version, err := downloadRelease()
+	fs := newFlagSet("update")
+	force := fs.Bool("force", false, "install even if the release is not newer than this binary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	arch := runtime.GOARCH
+	if arch != "arm64" && arch != "amd64" {
+		return fmt.Errorf("no prebuilt release for GOARCH=%s", arch)
+	}
+	asset := "vpn-darwin-" + arch
+
+	bin, version, err := downloadVerified(releaseAssetBaseURL, asset, *force)
+	if errors.Is(err, errUpToDate) {
+		fmt.Printf("Already up to date (%s).\n", Version)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	defer os.Remove(buildOut)
+	fmt.Printf("Downloaded and verified %s (%s)...\n", asset, version)
 
-	installPath := "/usr/local/bin/vpn"
+	staged := filepath.Join(stagingDir, asset)
+	defer func() { _ = privilege.Elevate(func() error { return os.RemoveAll(stagingDir) }) }()
 	if err := privilege.Elevate(func() error {
-		return installBinary(buildOut, installPath)
+		if err := os.MkdirAll(stagingDir, 0o755); err != nil {
+			return err
+		}
+		return writeRootFile(staged, bin, 0o755)
+	}); err != nil {
+		return fmt.Errorf("stage downloaded binary: %w", err)
+	}
+	// Run unprivileged: it only has to prove the binary starts on this Mac.
+	if out, err := exec.Command(staged, "version").Output(); err != nil {
+		return fmt.Errorf("downloaded binary doesn't run: %w", err)
+	} else if got := strings.TrimSpace(string(out)); got != "vpn "+version {
+		return fmt.Errorf("downloaded binary reports %q, but the signed manifest says %s", got, version)
+	}
+
+	if err := privilege.Elevate(func() error {
+		tmp := installPath + ".new"
+		if err := writeRootFile(tmp, bin, 0o4755); err != nil { // setuid + rwxr-xr-x
+			return err
+		}
+		return os.Rename(tmp, installPath)
 	}); err != nil {
 		return fmt.Errorf("installing new build to %s failed: %w", installPath, err)
 	}
@@ -35,98 +85,122 @@ func cmdUpdate(args []string) error {
 	return nil
 }
 
-// downloadRelease fetches this machine's architecture's prebuilt binary from
-// the latest GitHub release. Every install/update path uses this binary-only
-// flow; it never clones or builds source on the target machine. The same
-// binary works for anyone because the per-install owner restriction lives in
-// privilege.OwnerFile, not in a build-time constant.
-func downloadRelease() (path, version string, err error) {
-	arch := runtime.GOARCH
-	if arch != "arm64" && arch != "amd64" {
-		return "", "", fmt.Errorf("no prebuilt release for GOARCH=%s", arch)
-	}
-	url := releaseAssetBaseURL + "vpn-darwin-" + arch
-
-	resp, err := http.Get(url)
+// downloadVerified fetches the signed manifest, its signature and the asset
+// from baseURL, returning the asset only once the signature, version order
+// and SHA-256 all check out. Everything stays in memory: nothing an
+// unprivileged process could modify is ever read back by the privileged
+// install step.
+func downloadVerified(baseURL, asset string, force bool) (bin []byte, version string, err error) {
+	manifestBytes, err := fetch(baseURL + release.ManifestName)
 	if err != nil {
-		return "", "", fmt.Errorf("download %s: %w", url, err)
+		return nil, "", err
+	}
+	sig, err := fetch(baseURL + release.SignatureName)
+	if err != nil {
+		return nil, "", err
+	}
+	manifest, err := verifyManifest(manifestBytes, sig)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := checkNewer(manifest.Version, Version, force); err != nil {
+		return nil, "", err
+	}
+	bin, err = fetch(baseURL + asset)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := manifest.CheckAsset(asset, bin); err != nil {
+		return nil, "", err
+	}
+	return bin, manifest.Version, nil
+}
+
+// errUpToDate is checkNewer's "nothing to do" outcome — not a failure, so
+// cmdUpdate reports it and exits 0.
+var errUpToDate = errors.New("already up to date")
+
+// checkNewer refuses a downgrade or reinstall unless forced: without it, a
+// party able to serve release assets could replay an older, genuinely
+// signed release that has a known vulnerability. A current build that is
+// not a release tag (a dev build) cannot be ordered, so it always updates.
+func checkNewer(candidate, current string, force bool) error {
+	next, ok := release.ParseSemver(candidate)
+	if !ok {
+		return fmt.Errorf("signed release has non-semver version %q", candidate)
+	}
+	cur, ok := release.ParseSemver(current)
+	if !ok || force {
+		return nil
+	}
+	switch next.Compare(cur) {
+	case 0:
+		return errUpToDate
+	case -1:
+		return fmt.Errorf("latest release %s is older than this binary (%s) — refusing to downgrade (use --force to override)", candidate, current)
+	}
+	return nil
+}
+
+var httpClient = &http.Client{Timeout: 2 * time.Minute}
+
+// verifyManifest is release.Verify, swappable only so tests can sign with a
+// throwaway key instead of the real release key.
+var verifyManifest = release.Verify
+
+func fetch(url string) ([]byte, error) {
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("download %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
-
-	// CreateTemp avoids a predictable name in a shared directory. The file is
-	// downloaded before privilege is raised, then later copied by the setuid
-	// process into /usr/local/bin.
-	f, err := os.CreateTemp("", "vpn-update-download-*")
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownload+1))
 	if err != nil {
-		return "", "", err
+		return nil, fmt.Errorf("download %s: %w", url, err)
 	}
-	out := f.Name()
-	if err := f.Chmod(0o755); err != nil {
-		f.Close()
-		os.Remove(out)
-		return "", "", err
+	if len(data) > maxDownload {
+		return nil, fmt.Errorf("download %s: larger than %d bytes", url, maxDownload)
 	}
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		f.Close()
-		os.Remove(out)
-		return "", "", fmt.Errorf("save downloaded binary: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(out)
-		return "", "", err
-	}
-
-	verOut, err := exec.Command(out, "version").Output()
-	if err != nil {
-		os.Remove(out)
-		return "", "", fmt.Errorf("downloaded binary doesn't run: %w", err)
-	}
-	version = strings.TrimSpace(string(verOut))
-	fmt.Printf("Downloaded prebuilt %s (%s)...\n", arch, version)
-	return out, version, nil
+	return data, nil
 }
 
-// installBinary copies src over dst and re-applies the setuid-root bit,
-// exactly like install.sh's own install step — must run while
-// privilege.Elevate has raised this process to root, since both the
-// destination directory and the chown target require it.
-func installBinary(src, dst string) error {
-	in, err := os.Open(src)
+// writeRootFile creates path fresh (never following or reusing whatever is
+// already there — /usr/local/bin is user-writable on Intel Homebrew Macs)
+// and sets owner root:wheel and mode on the open descriptor, so the bits
+// land on exactly the file this call wrote. Must run under
+// privilege.Elevate.
+//
+// mode uses raw chmod(2) bits: os.FileMode's setuid is a distinct high bit,
+// so os.Chmod(path, 0o4755) would silently NOT set setuid.
+func writeRootFile(path string, data []byte, mode uint32) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	fd, err := syscall.Open(path, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_EXCL|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0o700)
 	if err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+	f := os.NewFile(uintptr(fd), path)
+	fail := func(err error) error {
+		f.Close()
+		os.Remove(path)
 		return err
 	}
-	defer in.Close()
-
-	tmp := dst + ".new"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-	if err != nil {
-		return err
+	if _, err := f.Write(data); err != nil {
+		return fail(err)
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
+	if err := syscall.Fchown(fd, 0, 0); err != nil {
+		return fail(fmt.Errorf("chown root:wheel: %w", err))
 	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+	// After Fchown: chown(2) clears setuid, so the mode must come last.
+	if err := syscall.Fchmod(fd, mode); err != nil {
+		return fail(fmt.Errorf("chmod %o: %w", mode, err))
 	}
-	if err := os.Chown(tmp, 0, 0); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("chown root:wheel: %w", err)
+	if err := f.Sync(); err != nil {
+		return fail(err)
 	}
-	// syscall.Chmod, not os.Chmod: Go's os.FileMode doesn't map a plain
-	// numeric 0o4755 to the setuid bit the way the raw chmod(2) syscall
-	// (and the `chmod` shell command) does — os.ModeSetuid is a distinct,
-	// much higher bit in FileMode's own encoding, so os.Chmod(tmp, 0o4755)
-	// would silently NOT set setuid. The raw syscall takes the standard
-	// Unix mode bits directly, same as `chmod 4755`.
-	if err := syscall.Chmod(tmp, 0o4755); err != nil { // 04755: setuid + rwxr-xr-x
-		os.Remove(tmp)
-		return fmt.Errorf("chmod u+s: %w", err)
-	}
-	return os.Rename(tmp, dst)
+	return f.Close()
 }
