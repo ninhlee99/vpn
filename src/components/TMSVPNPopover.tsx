@@ -12,6 +12,12 @@ import {
 import { VPNProfile, ConnectionState, AppSettings } from '../types';
 import { TracingBorder } from './TracingBorder';
 
+// One lap of the tracing border, in seconds, and its tail as a fraction of the
+// perimeter — identical while connecting and once connected, as in main.swift's
+// StatusBorder.
+const COMET_PERIOD = 1.8;
+const COMET_TAIL = 0.35;
+
 export type PopoverViewMode = 'list' | 'add' | 'edit';
 
 interface TMSVPNPopoverProps {
@@ -147,12 +153,12 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
   const getStatusText = () => {
     switch (connectionState) {
-      case 'connected': return 'Đang kết nối';
-      case 'connecting': return 'Đang kết nối...';
-      case 'reconnecting': return 'Đang thử kết nối lại...';
-      case 'disconnecting': return 'Đang ngắt...';
-      case 'disconnected': return 'Đã ngắt kết nối';
-      case 'error': return 'Lỗi kết nối';
+      case 'connected': return 'Connected';
+      case 'connecting': return 'Connecting...';
+      case 'reconnecting': return 'Reconnecting...';
+      case 'disconnecting': return 'Disconnecting...';
+      case 'disconnected': return 'Not Connected';
+      case 'error': return 'Connection Error';
     }
   };
 
@@ -179,7 +185,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
       />
 
       {/* ========================================================================= */}
-      {/* VIEW 1: ADD PROFILE FORM (THÊM ĐIỂM NỐI TRỰC TIẾP TRONG POPOVER) */}
+      {/* VIEW 1: ADD PROFILE FORM (inline in the popover) */}
       {/* ========================================================================= */}
       {currentView === 'add' && (
         <form onSubmit={handleAddSubmit} className="animate-in fade-in slide-in-from-right-3 duration-150">
@@ -191,13 +197,13 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               className="flex items-center gap-1 text-[12.5px] font-medium text-cyan-400 hover:text-cyan-300 transition-colors py-1 px-1.5 -ml-1 rounded-md hover:bg-white/5"
             >
               <ChevronLeft className="w-4 h-4" />
-              <span>Quay lại</span>
+              <span>Back</span>
             </button>
-            <span className="text-[14px] font-semibold text-white">Thêm Điểm Nối L2TP</span>
+            <span className="text-[14px] font-semibold text-white">Add L2TP VPN Configuration</span>
             <button
               type="button"
               onClick={onClosePopover}
-              title="Đóng cửa sổ"
+              title="Close"
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors -mr-1"
             >
               <X className="w-4 h-4" />
@@ -208,12 +214,12 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
           <div className="p-4 space-y-3 text-[13px]">
             <div>
               <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                Tên điểm nối *
+                Display name *
               </label>
               <input
                 type="text"
                 required
-                placeholder="VD: Chi nhánh Hà Nội, Server Staging..."
+                placeholder="Required"
                 value={addName}
                 onChange={(e) => setAddName(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 text-[13px]"
@@ -222,12 +228,12 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
             <div>
               <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                Địa chỉ máy chủ (Host / IP) *
+                Server address *
               </label>
               <input
                 type="text"
                 required
-                placeholder="vpn.company.internal hoặc IP"
+                placeholder="vpn.example.com or 1.2.3.4"
                 value={addServer}
                 onChange={(e) => setAddServer(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400 text-[13px]"
@@ -237,7 +243,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                  Tài khoản
+                  Account name
                 </label>
                 <input
                   type="text"
@@ -250,7 +256,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                  Khóa bí mật (Secret)
+                  Shared secret
                 </label>
                 <input
                   type="password"
@@ -266,8 +272,8 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <div className="pt-1">
               <div className="p-3 bg-black/30 rounded-xl border border-white/5 flex items-center justify-between">
                 <div className="pr-3">
-                  <div className="text-[12.5px] font-medium text-white">Gửi toàn bộ traffic</div>
-                  <div className="text-[11px] text-slate-400">Định tuyến tất cả lưu lượng Internet qua VPN</div>
+                  <div className="text-[12.5px] font-medium text-white">Send all traffic over VPN</div>
+                  <div className="text-[11px] text-slate-400">Route all internet traffic through the VPN</div>
                 </div>
                 <button
                   type="button"
@@ -293,20 +299,20 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               onClick={() => setViewMode('list')}
               className="px-3 py-1.5 rounded-xl text-[12px] font-medium text-slate-300 hover:text-white hover:bg-white/5 transition-colors"
             >
-              Hủy
+              Cancel
             </button>
             <button
               type="submit"
               className="px-4 py-1.5 rounded-xl text-[12.5px] font-semibold text-white bg-blue-600 hover:bg-blue-500 transition-colors shadow-sm"
             >
-              Lưu
+              Create
             </button>
           </div>
         </form>
       )}
 
       {/* ========================================================================= */}
-      {/* VIEW 3: EDIT PROFILE FORM (CHỈNH SỬA HỒ SƠ TRỰC TIẾP TRONG POPOVER) */}
+      {/* VIEW 3: EDIT PROFILE FORM (inline in the popover) */}
       {/* ========================================================================= */}
       {currentView === 'edit' && editingProfile && (
         <form onSubmit={handleSaveEditSubmit} className="animate-in fade-in slide-in-from-right-3 duration-150">
@@ -321,13 +327,13 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               className="flex items-center gap-1 text-[12.5px] font-medium text-cyan-400 hover:text-cyan-300 transition-colors py-1 px-1.5 -ml-1 rounded-md hover:bg-white/5"
             >
               <ChevronLeft className="w-4 h-4" />
-              <span>Quay lại</span>
+              <span>Back</span>
             </button>
-            <span className="text-[14px] font-semibold text-white">Chỉnh Sửa Hồ Sơ</span>
+            <span className="text-[14px] font-semibold text-white">Edit VPN Configuration</span>
             <button
               type="button"
               onClick={onClosePopover}
-              title="Đóng cửa sổ"
+              title="Close"
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors -mr-1"
             >
               <X className="w-4 h-4" />
@@ -338,7 +344,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
           <div className="p-4 space-y-3 text-[13px]">
             <div>
               <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                Tên điểm nối *
+                Display name *
               </label>
               <input
                 type="text"
@@ -351,7 +357,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
             <div>
               <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                Địa chỉ máy chủ (Host / IP) *
+                Server address *
               </label>
               <input
                 type="text"
@@ -365,7 +371,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                  Tài khoản
+                  Account name
                 </label>
                 <input
                   type="text"
@@ -378,7 +384,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-[#8e9aa8] mb-1 uppercase tracking-wider">
-                  Khóa bí mật (Secret)
+                  Shared secret
                 </label>
                 <input
                   type="password"
@@ -394,8 +400,8 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <div className="pt-1">
               <div className="p-3 bg-black/30 rounded-xl border border-white/5 flex items-center justify-between">
                 <div className="pr-3">
-                  <div className="text-[12.5px] font-medium text-white">Gửi toàn bộ traffic</div>
-                  <div className="text-[11px] text-slate-400">Định tuyến tất cả lưu lượng Internet qua VPN</div>
+                  <div className="text-[12.5px] font-medium text-white">Send all traffic over VPN</div>
+                  <div className="text-[11px] text-slate-400">Route all internet traffic through the VPN</div>
                 </div>
                 <button
                   type="button"
@@ -424,20 +430,20 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               }}
               className="px-3 py-1.5 rounded-xl text-[12px] font-medium text-slate-300 hover:text-white hover:bg-white/5 transition-colors"
             >
-              Hủy
+              Cancel
             </button>
             <button
               type="submit"
               className="px-4 py-1.5 rounded-xl text-[12.5px] font-semibold text-white bg-blue-600 hover:bg-blue-500 transition-colors shadow-sm"
             >
-              Lưu thay đổi
+              Save
             </button>
           </div>
         </form>
       )}
 
       {/* ========================================================================= */}
-      {/* VIEW 4: MAIN LIST VIEW (DANH SÁCH HỒ SƠ VPN) */}
+      {/* VIEW 4: MAIN LIST VIEW */}
       {/* ========================================================================= */}
       {currentView === 'list' && (
         <div className="animate-in fade-in duration-100">
@@ -455,10 +461,10 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                 }`}
               >
                 {(connectionState === 'connecting' || connectionState === 'reconnecting') && (
-                  <TracingBorder tone="amber" radius={14} period={1.8} strokeWidth={2} tail={0.35} />
+                  <TracingBorder tone="amber" radius={14} period={COMET_PERIOD} strokeWidth={2} tail={COMET_TAIL} />
                 )}
                 {connectionState === 'connected' && (
-                  <TracingBorder tone="green" radius={14} period={3.6} strokeWidth={2} tail={0.22} />
+                  <TracingBorder tone="green" radius={14} period={COMET_PERIOD} strokeWidth={2} tail={COMET_TAIL} />
                 )}
                 <div className="relative z-10 flex items-center justify-center">
                   <Shield
@@ -504,7 +510,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
             <button
               id="btn-close-popover"
               onClick={onClosePopover}
-              title="Đóng (Esc)"
+              title="Close (Esc)"
               className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10 transition-colors"
             >
               <X className="w-4 h-4" />
@@ -516,7 +522,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
           {/* Profile Section Header */}
           <div id="popover-profile-header" className="px-5 pt-4 pb-2.5 flex items-center justify-between">
             <span className="text-[11px] font-bold tracking-wider text-[#8e9aa8] uppercase">
-              Danh sách
+              Configurations
             </span>
             <button
               id="btn-add-profile"
@@ -524,7 +530,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               className="flex items-center gap-1 px-3 py-1 rounded-[8px] text-[12px] font-medium text-[#22d3ee] bg-[#0c2a38]/60 border border-[#196b7d]/60 hover:bg-[#0c2a38] hover:border-[#22d3ee]/80 transition-all active:scale-95"
             >
               <Plus className="w-3.5 h-3.5" />
-              <span>Thêm</span>
+              <span>Add</span>
             </button>
           </div>
 
@@ -553,14 +559,14 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                       : 'bg-[#181f2b]/70 border-white/[0.08] hover:border-white/20 hover:bg-[#181f2b]'
                   }`}
                 >
-                  {/* Light tracing the border: amber while connecting, red while reconnecting, slow green once connected */}
+                  {/* Light tracing the border: amber while connecting, red while reconnecting, green once connected — same motion in every state */}
                   {(isConnected || isConnecting || isReconnecting) && (
                     <TracingBorder
                       key={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
                       tone={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
                       radius={14}
-                      period={isConnected && !isConnecting && !isReconnecting ? 3.6 : 1.8}
-                      tail={isConnected && !isConnecting && !isReconnecting ? 0.22 : 0.35}
+                      period={COMET_PERIOD}
+                      tail={COMET_TAIL}
                     />
                   )}
 
@@ -602,12 +608,12 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                         {isReconnecting ? (
                           <div className="text-[11px] text-red-300 font-medium tracking-tight flex items-center gap-1 mt-0.5 fade-in-soft">
                             <span className="w-1.5 h-1.5 rounded-full bg-red-400 animate-ping" />
-                            <span>Đang thử kết nối lại...</span>
+                            <span>Reconnecting...</span>
                           </div>
                         ) : isConnecting ? (
                           <div className="text-[11px] text-amber-300 font-medium tracking-tight flex items-center gap-1 mt-0.5 fade-in-soft">
                             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
-                            <span>Đang kết nối đến máy chủ...</span>
+                            <span>Connecting to server...</span>
                           </div>
                         ) : (
                           <div className="text-[11px] text-slate-400 truncate mt-0.5 fade-in-soft">
@@ -671,7 +677,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                               className="w-full text-left px-3 py-1.5 hover:bg-white/10 flex items-center gap-2 cursor-pointer"
                             >
                               <Edit3 className="w-3.5 h-3.5 text-blue-400" />
-                              <span>Chỉnh sửa</span>
+                              <span>Edit</span>
                             </button>
 
                             <div className="my-1 border-t border-white/10" />
@@ -686,7 +692,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                               className="w-full text-left px-3 py-1.5 hover:bg-red-500/20 text-red-400 flex items-center gap-2 cursor-pointer"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
-                              <span>Xóa hồ sơ</span>
+                              <span>Delete</span>
                             </button>
                           </div>
                         )}
@@ -711,7 +717,7 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
               className="flex items-center gap-1.5 text-[12px] text-[#8e9aa8] hover:text-white transition-colors group py-1 px-2 rounded-lg hover:bg-white/5"
             >
               <LogOut className="w-3.5 h-3.5 group-hover:-translate-x-0.5 transition-transform" />
-              <span className="font-medium">Thoát</span>
+              <span className="font-medium">Quit</span>
               <kbd className="text-[10.5px] font-sans px-1.5 py-0.5 rounded bg-white/5 text-[#8e9aa8] group-hover:text-white border border-white/10 ml-0.5">
                 ⌘Q
               </kbd>

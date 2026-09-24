@@ -206,13 +206,13 @@ export default function App() {
             className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#12161f]/90 hover:bg-[#181f2c] border border-white/10 text-slate-300 hover:text-white text-[12px] font-medium shadow-lg backdrop-blur-md transition-all active:scale-95"
           >
             <Code2 className="w-4 h-4 text-cyan-400" />
-            <span>Xem mã nguồn Swift (1 Binary)</span>
+            <span>View Swift source (single binary)</span>
           </button>
         </div>
 
         {/* Live Interactive Animation State Switcher */}
         <div className="absolute bottom-4 right-4 z-20 hidden md:flex items-center gap-1.5 p-1.5 rounded-xl bg-[#12161f]/95 border border-white/10 shadow-2xl backdrop-blur-md text-[11px]">
-          <span className="text-slate-400 px-2 font-medium">Mô phỏng hiệu ứng:</span>
+          <span className="text-slate-400 px-2 font-medium">Simulate state:</span>
           <button
             onClick={() => {
               setConnectionState('connecting');
@@ -224,7 +224,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟠 Connecting (Viền sáng chạy)
+            🟠 Connecting (tracing border)
           </button>
           <button
             onClick={() => {
@@ -237,7 +237,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟢 Connected (Viền sáng chậm)
+            🟢 Connected (tracing border)
           </button>
           <button
             onClick={() => {
@@ -281,7 +281,7 @@ export default function App() {
             <div className="px-5 py-3.5 border-b border-white/10 flex items-center justify-between bg-[#141a26]">
               <div className="flex items-center gap-2">
                 <Code2 className="w-4 h-4 text-cyan-400" />
-                <span className="text-[14px] font-bold text-white">Mã Nguồn Swift Native (1 Binary Độc Lập - Zero Dependency)</span>
+                <span className="text-[14px] font-bold text-white">Native Swift Source (single standalone binary, zero dependencies)</span>
               </div>
               <button
                 onClick={() => setIsCodeModalOpen(false)}

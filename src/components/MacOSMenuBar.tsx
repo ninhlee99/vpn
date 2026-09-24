@@ -27,7 +27,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
   useEffect(() => {
     const updateTime = () => {
       const now = new Date();
-      const days = ['CN', 'Th 2', 'Th 3', 'Th 4', 'Th 5', 'Th 6', 'Th 7'];
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
       const day = days[now.getDay()];
       const hours = now.getHours().toString().padStart(2, '0');
       const mins = now.getMinutes().toString().padStart(2, '0');
@@ -115,14 +115,14 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer"
               >
-                Giới thiệu về máy Mac này
+                About This Mac
               </div>
               <div className="my-1 border-t border-white/10" />
               <div
                 onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
               >
-                <span>Cài đặt hệ thống...</span>
+                <span>System Settings...</span>
               </div>
             </div>
           )}
@@ -145,14 +145,14 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center gap-2"
               >
                 <Info className="w-3.5 h-3.5 opacity-70" />
-                <span>Giới thiệu TMS VPN</span>
+                <span>About TMS VPN</span>
               </div>
               <div className="my-1 border-t border-white/10" />
               <div
                 onClick={() => setActiveMenu(null)}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
               >
-                <span>Ẩn TMS VPN</span>
+                <span>Hide TMS VPN</span>
                 <span className="text-[12px] opacity-60">⌘H</span>
               </div>
               <div className="my-1 border-t border-white/10" />
@@ -165,7 +165,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <LogOut className="w-3.5 h-3.5" />
-                  <span>Thoát TMS VPN</span>
+                  <span>Quit TMS VPN</span>
                 </div>
                 <span className="text-[12px] opacity-60">⌘Q</span>
               </div>
@@ -181,7 +181,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               activeMenu === 'profile' ? 'bg-white/20 text-white' : 'hover:bg-white/10 text-slate-200'
             }`}
           >
-            Hồ sơ
+            Configurations
           </button>
           {activeMenu === 'profile' && (
             <div className="absolute top-8 left-0 w-56 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
@@ -194,7 +194,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               >
                 <div className="flex items-center gap-2">
                   <Plus className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>Thêm điểm nối mới...</span>
+                  <span>Add VPN Configuration...</span>
                 </div>
                 <span className="text-[12px] opacity-60">⌘N</span>
               </div>
@@ -202,7 +202,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
           )}
         </div>
 
-        {/* Window / Cửa sổ Menu */}
+        {/* Window menu */}
         <div className="relative">
           <button
             onClick={() => setActiveMenu(activeMenu === 'window' ? null : 'window')}
@@ -210,7 +210,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               activeMenu === 'window' ? 'bg-white/20 text-white' : 'hover:bg-white/10 text-slate-200'
             }`}
           >
-            Cửa sổ
+            Window
           </button>
           {activeMenu === 'window' && (
             <div className="absolute top-8 left-0 w-56 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
@@ -221,7 +221,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 }}
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center justify-between"
               >
-                <span>Bảng điều khiển Menu Bar</span>
+                <span>Menu Bar Panel</span>
                 <span className="text-[12px] opacity-60">⌘1</span>
               </div>
             </div>
@@ -236,7 +236,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
               activeMenu === 'help' ? 'bg-white/20 text-white' : 'hover:bg-white/10 text-slate-200'
             }`}
           >
-            Trợ giúp
+            Help
           </button>
           {activeMenu === 'help' && (
             <div className="absolute top-8 left-0 w-60 rounded-xl bg-[#1a212d]/95 backdrop-blur-xl border border-white/10 shadow-2xl py-1 z-50 text-[13px] text-slate-200">
@@ -245,7 +245,7 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
                 className="px-3 py-1.5 hover:bg-blue-600 hover:text-white rounded-md mx-1 cursor-pointer flex items-center gap-2"
               >
                 <ShieldQuestion className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Hướng dẫn cấu hình L2TP macOS</span>
+                <span>L2TP Setup Guide</span>
               </div>
             </div>
           )}
