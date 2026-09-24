@@ -1487,7 +1487,10 @@ export const SwiftSourceViewer: React.FC = () => {
             <FileCode className="w-4 h-4 text-cyan-400" />
             <span className="font-mono text-[13px] font-bold text-white">main.swift</span>
             <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
-              Swift 5.9 / 6.0 MainActor Safe
+              Swift 6 · Xcode 26
+            </span>
+            <span className="text-[11px] text-slate-400">
+              Bản chụp minh hoạ — mã nguồn thật là main.swift trong repo.
             </span>
           </div>
 
