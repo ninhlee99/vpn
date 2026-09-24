@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -47,5 +48,29 @@ func TestFailStreakOnlyFatalWhenPersistent(t *testing.T) {
 	}
 	if fatal, _ := f.fail(now.Add(7 * time.Second)); !fatal {
 		t.Fatal("errors persisting past the limit must be fatal")
+	}
+}
+
+func TestTransientNegotiationFailure(t *testing.T) {
+	mk := func(stage, detail string, err string) *connectError {
+		return &connectError{stage: stage, detail: detail, err: errors.New(err)}
+	}
+	cases := []struct {
+		name string
+		ce   *connectError
+		want bool
+	}{
+		{"LNS never answers SCCRQ", mk("L2TP_TIMEOUT", "L2TP tunnel/session establishment", "no reply after 6 attempts"), true},
+		{"no CHAP challenge", mk("PPP_AUTH_FAILURE", "PPP negotiation", "timed out waiting for CHAP Challenge"), true},
+		{"LCP timeout", mk("LCP_FAILED", "PPP negotiation", "timed out waiting for peer"), true},
+		{"wrong password", mk("PPP_AUTH_FAILURE", "PPP negotiation", "CHAP authentication rejected by peer: Login Failed"), false},
+		{"already logged in", mk("PPP_AUTH_FAILURE", "PPP negotiation", "CHAP authentication rejected by peer: You are already logged in"), false},
+		{"IKE unreachable", mk("IKE_TIMEOUT", "IKEv1 Phase 1 negotiation", "no response"), false},
+		{"routing", mk("ROUTE_FAILURE", "capture", "boom"), false},
+	}
+	for _, c := range cases {
+		if got := transientNegotiationFailure(c.ce); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
 	}
 }

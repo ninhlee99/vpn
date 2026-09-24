@@ -93,6 +93,28 @@ const (
 	maxAuthRejections = 3 // consecutive real credential rejections before giving up
 )
 
+// A first connect whose negotiation merely times out — the LNS not answering
+// SCCRQ, or never sending its CHAP challenge — is retried by the daemon a couple
+// of times before the user is shown an error: the server does this
+// intermittently (typically while it still holds an earlier session) and the
+// very next attempt normally goes through. Credential rejections are never
+// retried.
+const (
+	maxNegotiationRetries = 2
+	negotiationRetryWait  = 3 * time.Second
+)
+
+// transientNegotiationFailure reports whether ce is such a timeout.
+func transientNegotiationFailure(ce *connectError) bool {
+	switch ce.stage {
+	case "L2TP_TIMEOUT":
+		return true
+	case "LCP_FAILED", "PPP_AUTH_FAILURE", "IPCP_FAILURE":
+		return strings.Contains(ce.Error(), "timed out")
+	}
+	return false
+}
+
 // Connect brings the tunnel up and keeps it up. The first attempt behaves
 // as it always did: any failure is returned (and recorded as FAILED) so the
 // user sees it. Once a tunnel has been established, though, losing it is not
@@ -119,6 +141,7 @@ func Connect(cfg Config) error {
 		reconnects   int
 		wait         = reconnectMin
 		authRejects  int
+		negRetries   int  // first-connect negotiation timeouts retried so far
 		blocked      bool // a kill-switch hold may have left blackhole routes that only we can remove
 	)
 	releaseBlock := func() {
@@ -129,7 +152,10 @@ func Connect(cfg Config) error {
 	}
 	defer releaseBlock() // every way out of Connect ends with the network back to normal
 	for {
-		err := connectOnce(sigCtx, cfg, reconnecting, reconnects)
+		// While retries remain, a failed first attempt is recorded as CONNECTING
+		// (not FAILED), so the UI keeps showing progress instead of an alert.
+		quiet := !reconnecting && negRetries < maxNegotiationRetries
+		err := connectOnce(sigCtx, cfg, reconnecting, reconnects, quiet)
 		if err == nil {
 			return nil // disconnected on request
 		}
@@ -159,6 +185,14 @@ func Connect(cfg Config) error {
 				authRejects = 0
 			}
 			vpnlog.Error("ENGINE", "reconnect attempt failed — will retry", vpnlog.Fields{"err": err, "retry_in": wait})
+		case quiet && errors.As(err, &ce) && transientNegotiationFailure(ce):
+			negRetries++
+			wait = negotiationRetryWait
+			vpnlog.Error("ENGINE", "connect attempt timed out during negotiation — retrying", vpnlog.Fields{"err": err, "retry": negRetries, "of": maxNegotiationRetries})
+		case quiet && errors.As(err, &ce):
+			// Not a timeout (e.g. wrong password): the quiet attempt recorded
+			// CONNECTING, so record the real outcome before exiting.
+			return finalFailure(cfg, ce)
 		default:
 			return err
 		}
@@ -207,7 +241,7 @@ func finalFailure(cfg Config, ce *connectError) error {
 // neither of which requires root once open, so there's no reason for the
 // process to keep holding root through what's normally the vast majority
 // of a session's lifetime.
-func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int) error {
+func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int, quiet bool) error {
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server, Reconnecting: reconnecting, Reconnects: reconnects}
 	var connectedAt time.Time
 
@@ -294,7 +328,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				vpnlog.Info("ENGINE", "connect aborted by disconnect", vpnlog.Fields{"stage": stage})
 				return errAbortedByDisconnect
 			}
-			if reconnecting {
+			if reconnecting || quiet {
 				// Still an attempt in progress, not a failure the user has to
 				// act on: the reason rides along for `vpn status` and the log.
 				st.Phase = state.PhaseConnecting
