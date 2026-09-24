@@ -80,7 +80,10 @@ func (e *tunnelDropped) Unwrap() error { return e.cause }
 
 // staleSession is the LNS's tunnel/session ID pair of a session of ours that
 // may still be alive on the server.
-type staleSession struct{ tunnel, session uint16 }
+type staleSession struct {
+	tunnel, session uint16
+	done            bool // already sent: one round of Terminate per record, not one per attempt
+}
 
 // staleTerminateAttempts / staleTerminateGap: the Terminate-Request is
 // unreliable (a data message), so it is sent a few times.
@@ -98,6 +101,10 @@ var (
 // the server's pppd gives up on its unanswered echoes (about 75 s measured).
 // Harmless if the session is already gone: the LNS ignores unknown IDs.
 func evictStale(t l2tp.Transport, s *staleSession) {
+	if s.done {
+		return
+	}
+	s.done = true
 	frame := ppp.Frame{Protocol: ppp.ProtoLCP, Payload: ppp.ControlPacket{Code: ppp.CodeTerminateRequest, Identifier: 0x7f}.Marshal()}
 	raw := frame.Marshal()
 	for i := 0; i < staleTerminateAttempts; i++ {
@@ -182,6 +189,12 @@ func Connect(cfg Config) error {
 		stale        *staleSession // the last dropped tunnel's server-side session, until a new one replaces it
 		blocked      bool          // a kill-switch hold may have left blackhole routes that only we can remove
 	)
+	// A session an earlier run could not close (killed daemon, crash, reboot)
+	// is ended by the first attempt, before it logs in.
+	stale = loadLastSession(cfg.Server, time.Now())
+	if stale != nil {
+		vpnlog.Info("ENGINE", "found a session left by an earlier run — it will be ended before logging in", vpnlog.Fields{"tunnel": stale.tunnel, "session": stale.session})
+	}
 	releaseBlock := func() {
 		if blocked {
 			_ = privilege.Elevate(func() error { return routing.RestoreByServerIP(cfg.Server) })
@@ -661,6 +674,10 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		}
 		return setupErr
 	}
+	{
+		pt, ps := l2tpTun.PeerIDs()
+		saveLastSession(cfg.Server, pt, ps)
+	}
 	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name, "mtu": cfg.MTU, "full_tunnel": cfg.FullTunnel, "reconnects": reconnects,
 		"ike_lifetime_s": int(mux.current().IKELifetime() / time.Second), "esp_lifetime_s": int(sas.current().expires.Sub(connectedAt) / time.Second)})
 
@@ -712,7 +729,14 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 	startRekey(dpCtx, drop)
 	startReauth(dpCtx, drop)
 	go func() {
+		reports := 0
 		report := func(idle time.Duration) {
+			// Keep the record's liveness stamp fresh (one small write per few minutes).
+			if reports++; time.Duration(reports)*keepaliveEvery*statsEvery >= lastSessionRefresh {
+				reports = 0
+				pt, ps := l2tpTun.PeerIDs()
+				saveLastSession(cfg.Server, pt, ps)
+			}
 			cur := sas.current()
 			vpnlog.Info("ENGINE", "tunnel alive", vpnlog.Fields{
 				"rx_packets": live.rx.Load(), "tx_packets": live.tx.Load(),
@@ -796,6 +820,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 			pt, ps := l2tpTun.PeerIDs()
 			return &tunnelDropped{cause: pumpErr, uptime: uptime, stale: &staleSession{tunnel: pt, session: ps}}
 		}
+		clearLastSession() // closed properly: nothing left on the server to end
 		_ = state.Clear()
 		vpnlog.Info("ENGINE", "disconnected", nil)
 		return nil
