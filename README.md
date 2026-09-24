@@ -19,7 +19,14 @@ VPN client L2TP/IPsec thuần macOS, không phụ thuộc strongSwan, xl2tpd, pp
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install.sh | bash
 ```
 
-Script tự nhận diện kiến trúc máy; dùng `install-arm64.sh` hoặc `install-intel.sh` để chỉ định thẳng. Installer cài CLI vào `/usr/local/bin/vpn` (setuid-root, xem [Bảo mật](#bảo-mật)) và app vào `/Applications/TMS VPN.app`, sau khi đối chiếu `SHA256SUMS` của release.
+Script tự nhận diện kiến trúc máy. Muốn chỉ định thẳng:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-arm64.sh | bash   # Apple Silicon (M1/M2/M3...)
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-intel.sh | bash   # Mac Intel
+```
+
+Installer cài CLI vào `/usr/local/bin/vpn` (setuid-root, xem [Bảo mật](#bảo-mật)) và app vào `/Applications/TMS VPN.app`, sau khi đối chiếu `SHA256SUMS` của release.
 
 ```bash
 vpn version    # xác nhận cài xong
@@ -150,7 +157,11 @@ Muốn cập nhật cả app, chạy lại lệnh cài ở trên.
 | Lệnh | Gỡ gì |
 |---|---|
 | `vpn uninstall` | CLI, log, state, mọi profile/account kèm secret trong Keychain (giữ lại app) |
-| `curl -fsSL .../uninstall.sh \| bash` | Tất cả những thứ trên **và** app |
+| `uninstall.sh` (bên dưới) | Tất cả những thứ trên **và** app |
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/uninstall.sh | bash
+```
 
 ## Bảo mật
 
