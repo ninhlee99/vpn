@@ -804,6 +804,7 @@ struct GlowSwitch: View {
             .animation(.easeInOut(duration: 0.3), value: tint)
         }
         .buttonStyle(.plain)
+        .focusable(false)
     }
 }
 
@@ -863,6 +864,7 @@ struct CustomMenuButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .focusable(false)
     }
 
     private func showNativeMenu() {
@@ -1144,6 +1146,7 @@ struct MenuBarPopupView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
             .padding(.horizontal, 16)
             .padding(.top, 14)
@@ -1225,6 +1228,7 @@ struct MenuBarPopupView: View {
                                     )
                                 }
                                 .buttonStyle(.plain)
+                                .focusable(false)
                             }
 
                             Button(action: {
@@ -1238,6 +1242,7 @@ struct MenuBarPopupView: View {
                                     .padding(.vertical, 5)
                             }
                             .buttonStyle(.plain)
+                            .focusable(false)
                         }
                         .padding(.top, 2)
                     }
@@ -1274,6 +1279,7 @@ struct MenuBarPopupView: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
                 .help("Settings")
                 .padding(.trailing, 6)
 
@@ -1286,6 +1292,7 @@ struct MenuBarPopupView: View {
                     .foregroundColor(Color(red: 0.7, green: 0.74, blue: 0.8))
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -1421,6 +1428,7 @@ struct SettingsSheet: View {
                         .font(.system(size: 16))
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
 
             SettingCard(
@@ -1463,6 +1471,7 @@ struct SettingsSheet: View {
                 Button("Done") { isPresented = false }
                     .keyboardShortcut(.defaultAction)
                     .buttonStyle(PrimaryButtonStyle())
+                    .focusable(false)
             }
             .padding(.top, 2)
         }
@@ -1498,6 +1507,7 @@ struct ProfileFormSheet: View {
                         .font(.system(size: 16))
                 }
                 .buttonStyle(.plain)
+                .focusable(false)
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -1565,6 +1575,7 @@ struct ProfileFormSheet: View {
                 }
                 .keyboardShortcut(.cancelAction)
                 .buttonStyle(SecondaryButtonStyle())
+                .focusable(false)
 
                 Button(isEdit ? "Save" : "Create") {
                     guard !name.trimmingCharacters(in: .whitespaces).isEmpty,
@@ -1584,6 +1595,7 @@ struct ProfileFormSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(PrimaryButtonStyle())
+                .focusable(false)
             }
             .padding(.top, 8)
         }
@@ -1656,7 +1668,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         }
         self.hostingView = hosting
 
-        popover.contentSize = NSSize(width: 400, height: 440)
         popover.behavior = .transient
         popover.delegate = self
         // The UI is drawn for a dark surface (white text, hand-picked dark fills).
@@ -1664,7 +1675,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
         // sheets, the popover arrow) look the same on every Mac instead of
         // following each machine's Light/Dark setting.
         popover.appearance = NSAppearance(named: .darkAqua)
-        popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
+        let popupController = NSHostingController(rootView: MenuBarPopupView())
+        popover.contentViewController = popupController
+        // Size to the view's actual content first, same reasoning as showMainWindow()
+        // below: a guessed contentSize (e.g. 440) that doesn't match what SwiftUI
+        // actually lays out (e.g. 334 for the empty state) gets corrected by
+        // NSHostingController *after* the popover is shown, and NSPopover keeps the
+        // bottom edge fixed while shrinking — dropping the popover away from the
+        // status item instead of staying flush against it.
+        popover.contentSize = popupController.view.fittingSize
 
         // Opened from Finder/Launchpad → show a regular window.
         showMainWindow()
