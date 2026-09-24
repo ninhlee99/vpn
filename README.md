@@ -128,8 +128,17 @@ Nếu server không cấp DNS, `vpn connect` và `vpn status` sẽ cảnh báo: 
 | Flag | Ý nghĩa |
 |---|---|
 | `--server-id <id>` | ID mà server phải tự khai trong IKE (IP hoặc FQDN). Để trống thì chấp nhận mọi ID |
-| `--mtu <n>` | MTU của tunnel, mặc định 1400 |
+| `--mtu <n>` | MTU riêng của profile, mặc định 1400. Cài đặt chung `vpn mtu` (bên dưới) được ưu tiên hơn |
 | `--full-tunnel=false` | Split tunnel |
+
+### MTU cho mọi profile
+
+```bash
+vpn mtu          # xem MTU hiện tại
+vpn mtu 1280     # đặt cho tất cả profile (chỉ nhận 1280 hoặc 1400)
+```
+
+Áp dụng ở lần `connect` tiếp theo. Dùng 1280 khi mạng hay bị đứng lúc tải dữ liệu lớn (hotspot, PPPoE); 1400 là mặc định. Menu bar app có ô chọn MTU ở chân cửa sổ.
 
 ## Sự cố
 

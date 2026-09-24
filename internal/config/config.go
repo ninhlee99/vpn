@@ -34,10 +34,53 @@ type Profile struct {
 // Config is the on-disk, non-secret configuration for every known VPN
 // profile plus which one is currently selected.
 type Config struct {
+	// MTU, when set, is the tunnel MTU for every profile and wins over the
+	// per-profile value: it is a property of the network the user is on, not
+	// of a server, so it is one switch rather than one per profile.
+	MTU           int                 `json:"mtu,omitempty"`
 	ActiveProfile string              `json:"active_profile,omitempty"`
 	Profiles      map[string]*Profile `json:"profiles"`
 
 	path string // resolved on Load/New, not persisted
+}
+
+// DefaultMTU is used when neither the global setting nor the profile names one.
+const DefaultMTU = 1400
+
+// AllowedMTUs are the values a user may pick: 1400 fits ordinary links,
+// 1280 survives PPPoE, hotspots and other paths that fragment or drop the
+// ESP-encapsulated larger packets.
+var AllowedMTUs = []int{1280, 1400}
+
+// ValidMTU reports whether n is one of AllowedMTUs.
+func ValidMTU(n int) bool {
+	for _, v := range AllowedMTUs {
+		if v == n {
+			return true
+		}
+	}
+	return false
+}
+
+// SetMTU sets the global tunnel MTU for all profiles.
+func (c *Config) SetMTU(n int) error {
+	if !ValidMTU(n) {
+		return fmt.Errorf("mtu must be 1280 or 1400, got %d", n)
+	}
+	c.MTU = n
+	return nil
+}
+
+// EffectiveMTU is the MTU a connection using p should run with: the global
+// setting, else the profile's own, else DefaultMTU.
+func (c *Config) EffectiveMTU(p *Profile) int {
+	if c.MTU != 0 {
+		return c.MTU
+	}
+	if p != nil && p.MTU != 0 {
+		return p.MTU
+	}
+	return DefaultMTU
 }
 
 // DefaultIKEProposals mirrors the IKE proposals accepted by the reference
@@ -182,6 +225,9 @@ func (c *Config) AddProfile(name string, p *Profile) (updated bool) {
 		if len(p.ESPProposals) == 0 {
 			p.ESPProposals = old.ESPProposals
 		}
+		if p.MTU == 0 {
+			p.MTU = old.MTU
+		}
 	}
 	if len(p.IKEProposals) == 0 {
 		p.IKEProposals = append([]string(nil), DefaultIKEProposals...)
@@ -190,7 +236,7 @@ func (c *Config) AddProfile(name string, p *Profile) (updated bool) {
 		p.ESPProposals = append([]string(nil), DefaultESPProposals...)
 	}
 	if p.MTU == 0 {
-		p.MTU = 1400
+		p.MTU = DefaultMTU
 	}
 	if p.Accounts == nil {
 		p.Accounts = map[string]*Account{}

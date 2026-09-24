@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"vpn/internal/config"
@@ -38,6 +39,8 @@ func Run(args []string) int {
 		err = cmdProfile(rest)
 	case "account":
 		err = cmdAccount(rest)
+	case "mtu":
+		err = cmdMTU(rest)
 	case "diagnose":
 		err = cmdDiagnose(rest)
 	case "connect":
@@ -78,6 +81,7 @@ Usage:
   vpn profile list                  (* = active profile / default account)
   vpn profile remove <name>
   vpn account add <profile> <account> [--default] [--password pw]
+  vpn mtu [1280|1400]               show / set the tunnel MTU for all profiles (applies on the next connect)
   vpn diagnose [--profile name] [--server host] [--json]
   vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose] [--rekey-after 2m]  (always runs in the background)
   vpn disconnect
@@ -145,7 +149,7 @@ func cmdProfileAdd(args []string) error {
 	fs := newFlagSet("profile add")
 	server := fs.String("server", "", "VPN server host or IP (required)")
 	serverID := fs.String("server-id", "", "expected IKE remote ID")
-	mtu := fs.Int("mtu", 1400, "tunnel MTU override")
+	mtu := fs.Int("mtu", 0, "this profile's MTU (default: keep the current one, else 1400); the global `vpn mtu` setting wins")
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
 	psk := fs.String("psk", "", "IPsec pre-shared key (prompted if omitted)")
 	if err := fs.Parse(flagsFirst(args, map[string]bool{"--server": true, "--server-id": true, "--mtu": true, "--psk": true})); err != nil {
@@ -188,6 +192,33 @@ func cmdProfileAdd(args []string) error {
 	}
 	fmt.Printf("Profile %q %s (server=%s).\n", name, verb, *server)
 	return nil
+}
+
+// cmdMTU shows or sets the one tunnel MTU shared by every profile.
+func cmdMTU(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	switch len(args) {
+	case 0:
+		fmt.Println(cfg.EffectiveMTU(nil))
+		return nil
+	case 1:
+		n, err := strconv.Atoi(args[0])
+		if err != nil {
+			return fmt.Errorf("usage: vpn mtu [1280|1400]")
+		}
+		if err := cfg.SetMTU(n); err != nil {
+			return err
+		}
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("MTU set to %d for all profiles (applies on the next connect).\n", n)
+		return nil
+	}
+	return fmt.Errorf("usage: vpn mtu [1280|1400]")
 }
 
 // cmdProfileList prints every profile — the CLI otherwise had no way to see
