@@ -14,6 +14,7 @@ import (
 	"vpn/internal/config"
 	"vpn/internal/diagnostics"
 	"vpn/internal/keychain"
+	"vpn/internal/privilege"
 	"vpn/internal/secretinput"
 )
 
@@ -363,7 +364,7 @@ func cmdDiagnose(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	report := diagnostics.Run(ctx, target)
+	report := diagnostics.Run(ctx, target, privilege.Elevate)
 
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
@@ -388,8 +389,16 @@ func printReport(r *diagnostics.Report) {
 	if r.Connectivity.PingRTTMillis > 0 {
 		fmt.Printf("     ping avg RTT: %.1fms\n", r.Connectivity.PingRTTMillis)
 	}
-	fmt.Printf("%s UDP/500      (IKE)\n", ok(r.Connectivity.UDP500Reached))
-	fmt.Printf("%s UDP/4500     (NAT-T)\n", ok(r.Connectivity.UDP4500Reached))
+	fmt.Printf("%s UDP/500      (IKE responder answered)\n", ok(r.Connectivity.UDP500Reached))
+	switch r.Connectivity.FromPort500 {
+	case "ok":
+		fmt.Println("[OK] UDP/500      from local port 500")
+	case "no-answer":
+		fmt.Println("[WARN] UDP/500    no answer from local port 500 — this network drops IKE sourced from 500; `vpn connect` falls back to another port automatically")
+	default:
+		fmt.Println("[SKIP] UDP/500    from local port 500 (needs root, or the port is busy)")
+	}
+	fmt.Printf("%s UDP/4500     (NAT-T responder answered)\n", ok(r.Connectivity.UDP4500Reached))
 	fmt.Println("MTU probes:")
 	for _, p := range r.MTUProbes {
 		fmt.Printf("  %s %d bytes\n", ok(p.OK), p.Size)
