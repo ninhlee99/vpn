@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // Account is one login identity that can be used against a Profile's server.
@@ -160,7 +161,28 @@ func (p *Profile) Account(name string) (string, *Account, error) {
 // AddProfile creates or replaces a profile definition. It fills in the
 // compatibility-reference IKE/ESP proposals and MTU when the caller leaves
 // them unset, rather than inventing different defaults per call site.
-func (c *Config) AddProfile(name string, p *Profile) {
+//
+// Re-adding an existing name updates it in place: the accounts, default
+// account and any hand-edited proposals of the existing profile carry over
+// unless p sets them. Replacing it wholesale used to drop every account
+// from the config while their passwords stayed orphaned in Keychain.
+// Reports whether the profile already existed.
+func (c *Config) AddProfile(name string, p *Profile) (updated bool) {
+	if old, ok := c.Profiles[name]; ok {
+		updated = true
+		if len(p.Accounts) == 0 {
+			p.Accounts = old.Accounts
+		}
+		if p.DefaultAccount == "" {
+			p.DefaultAccount = old.DefaultAccount
+		}
+		if len(p.IKEProposals) == 0 {
+			p.IKEProposals = old.IKEProposals
+		}
+		if len(p.ESPProposals) == 0 {
+			p.ESPProposals = old.ESPProposals
+		}
+	}
 	if len(p.IKEProposals) == 0 {
 		p.IKEProposals = append([]string(nil), DefaultIKEProposals...)
 	}
@@ -180,4 +202,15 @@ func (c *Config) AddProfile(name string, p *Profile) {
 	if c.ActiveProfile == "" {
 		c.ActiveProfile = name
 	}
+	return updated
+}
+
+// ProfileNames returns every profile name, sorted.
+func (c *Config) ProfileNames() []string {
+	names := make([]string, 0, len(c.Profiles))
+	for n := range c.Profiles {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
