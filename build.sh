@@ -18,6 +18,14 @@ if [[ "$(uname)" != "Darwin" ]]; then
     exit 1
 fi
 
+# CI builds main.swift on the macos-26 runner image (Xcode 26, Swift 6).
+# Swift 5.9 is known to reject it (strict-concurrency errors); versions in
+# between are untested, so warn rather than refuse.
+SWIFT_MAJOR="$(swiftc --version 2>/dev/null | sed -nE 's/.*Swift version ([0-9]+)\..*/\1/p' | head -1)"
+if [[ -z "$SWIFT_MAJOR" || "$SWIFT_MAJOR" -lt 6 ]]; then
+    echo "⚠️  swiftc $(swiftc --version 2>/dev/null | sed -nE 's/.*Swift version ([0-9.]+).*/\1/p' | head -1) detected — CI builds this app with Xcode 26 (Swift 6); older toolchains may fail to compile it."
+fi
+
 echo "🔨 [2/3] Biên dịch Universal Binary (ARM64 Apple Silicon + Intel x86_64)..."
 
 swiftc -O -target arm64-apple-macos12.0 -framework Cocoa -framework SwiftUI main.swift -o "$BUILD_DIR/${OUTPUT_NAME}-arm64"
