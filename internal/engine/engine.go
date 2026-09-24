@@ -291,6 +291,12 @@ func Connect(cfg Config) error {
 		}
 
 		dnsServers := dnsServerStrings(ipcp)
+		if len(dnsServers) > 0 && !cfg.FullTunnel {
+			if err := rtSnapshot.RouteHostsViaTunnel(dnsServers, dev.Name); err != nil {
+				teardownPartial()
+				return fail("ROUTE_FAILURE", "route pushed DNS servers through the tunnel", err)
+			}
+		}
 		if len(dnsServers) > 0 {
 			service, err := dnsmgr.ServiceForInterface(rtSnapshot.DefaultInterface)
 			if err != nil {

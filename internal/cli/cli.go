@@ -74,6 +74,7 @@ func printUsage() {
 
 Usage:
   vpn profile add <name> --server <host> [--server-id id] [--mtu n] [--full-tunnel] [--psk key]
+  vpn profile list                  (* = active profile / default account)
   vpn profile remove <name>
   vpn account add <profile> <account> [--default] [--password pw]
   vpn diagnose [--profile name] [--server host] [--json]
@@ -83,7 +84,7 @@ Usage:
   vpn repair
   vpn logs [-f]
   vpn update [--force]              install the latest signed release if newer (--force: reinstall/downgrade)
-  vpn uninstall [-y]                remove vpn entirely: binary, log, state, all profiles/accounts (Keychain included)
+  vpn uninstall [-y]                remove the CLI, log, state, all profiles/accounts (Keychain included); not the menu bar app
   vpn version
 `)
 }
@@ -125,11 +126,13 @@ func flagsFirst(args []string, valueFlags map[string]bool) []string {
 
 func cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vpn profile <add|remove> ...")
+		return fmt.Errorf("usage: vpn profile <add|list|remove> ...")
 	}
 	switch args[0] {
 	case "add":
 		return cmdProfileAdd(args[1:])
+	case "list":
+		return cmdProfileList(args[1:])
 	case "remove":
 		return cmdProfileRemove(args[1:])
 	default:
@@ -166,7 +169,7 @@ func cmdProfileAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.AddProfile(name, &config.Profile{
+	updated := cfg.AddProfile(name, &config.Profile{
 		Server:     *server,
 		ServerID:   *serverID,
 		MTU:        *mtu,
@@ -178,8 +181,64 @@ func cmdProfileAdd(args []string) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("Profile %q added (server=%s).\n", name, *server)
+	verb := "added"
+	if updated {
+		verb = "updated (accounts kept)"
+	}
+	fmt.Printf("Profile %q %s (server=%s).\n", name, verb, *server)
 	return nil
+}
+
+// cmdProfileList prints every profile — the CLI otherwise had no way to see
+// what `vpn connect` would use.
+func cmdProfileList(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("usage: vpn profile list")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	names := cfg.ProfileNames()
+	if len(names) == 0 {
+		fmt.Println("No profiles yet — add one in the TMS VPN menu bar app or with `vpn profile add`.")
+		return nil
+	}
+	for _, n := range names {
+		fmt.Print(formatProfile(n, cfg.Profiles[n], n == cfg.ActiveProfile))
+	}
+	return nil
+}
+
+// formatProfile renders one profile for `profile list`: a "*" marks the
+// active profile and the default account.
+func formatProfile(name string, p *config.Profile, active bool) string {
+	marker := " "
+	if active {
+		marker = "*"
+	}
+	tunnel := "full tunnel"
+	if !p.FullTunnel {
+		tunnel = "split tunnel"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s %s  server=%s  %s\n", marker, name, p.Server, tunnel)
+	accounts := make([]string, 0, len(p.Accounts))
+	for a := range p.Accounts {
+		accounts = append(accounts, a)
+	}
+	sort.Strings(accounts)
+	if len(accounts) == 0 {
+		b.WriteString("    (no account — run `vpn account add " + name + " <username> --default`)\n")
+	}
+	for _, a := range accounts {
+		m := " "
+		if a == p.DefaultAccount {
+			m = "*"
+		}
+		fmt.Fprintf(&b, "  %s account %s\n", m, a)
+	}
+	return b.String()
 }
 
 func cmdProfileRemove(args []string) error {
@@ -205,12 +264,7 @@ func cmdProfileRemove(args []string) error {
 		// — otherwise a bare `vpn connect` would start failing right after
 		// removing whichever profile happened to be active.
 		cfg.ActiveProfile = ""
-		names := make([]string, 0, len(cfg.Profiles))
-		for n := range cfg.Profiles {
-			names = append(names, n)
-		}
-		if len(names) > 0 {
-			sort.Strings(names)
+		if names := cfg.ProfileNames(); len(names) > 0 {
 			cfg.ActiveProfile = names[0]
 		}
 	}

@@ -45,3 +45,11 @@ func TestReassertNothingBeforeSetup(t *testing.T) {
 		t.Fatalf("unconfigured snapshot reasserted %q", cmds)
 	}
 }
+
+func TestReassertIncludesSplitTunnelHosts(t *testing.T) {
+	s := &Snapshot{tunIface: "utun9", tunnelHosts: []string{"10.8.0.1"}}
+	cmds := s.reassertCommands()
+	if len(cmds) != 1 || strings.Join(cmds[0], " ") != "-n add -static -host 10.8.0.1 -interface utun9" {
+		t.Fatalf("got %q", cmds)
+	}
+}

@@ -20,11 +20,4 @@ export interface AppSettings {
 }
 
 
-export interface SwiftSourceFile {
-  filename: string;
-  path: string;
-  description: string;
-  category: 'core' | 'views' | 'backend' | 'build';
-  content: string;
-}
 

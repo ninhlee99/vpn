@@ -1,82 +1,252 @@
-# vpn
+# TMS VPN
 
-VPN client L2TP/IPsec thuần macOS.
+VPN client L2TP/IPsec thuần macOS. Gồm hai phần:
+
+- **App TMS VPN trên menu bar**: cách dùng hằng ngày. Thêm hồ sơ, bật/tắt kết nối, xem IP.
+- **CLI `vpn`**: engine thật sự làm việc (IKE, ESP, L2TP, PPP, route, DNS). App gọi CLI này. Bạn cũng dùng nó trực tiếp được từ terminal.
+
+Không cần strongSwan, xl2tpd, pppd, Docker hay WireGuard.
+
+## Trước khi bắt đầu
+
+**Máy của bạn**
+
+- macOS 12 trở lên, Apple Silicon hoặc Intel.
+- Quyền admin (installer cần `sudo` một lần).
+
+**Server VPN phải là loại client hỗ trợ**
+
+- L2TP/IPsec, **IKEv1** (Main Mode) xác thực bằng **pre-shared key (PSK)**, đăng nhập PPP bằng **MS-CHAPv2**.
+- Chỉ IPv4. Có hỗ trợ NAT-T (UDP 4500) khi đi qua NAT.
+- Không hỗ trợ IKEv2, chứng chỉ, PAP hay CHAP-MD5.
+
+**Xin admin VPN 4 thông tin**
+
+| Thông tin | Ví dụ |
+|---|---|
+| Địa chỉ server (host hoặc IP) | `vpn.example.com` |
+| Pre-shared key (PSK) | *(chuỗi bí mật dùng chung)* |
+| Username | `nguyenvana` |
+| Password | *(mật khẩu của riêng bạn)* |
 
 ## Cài đặt
-
-Tải thẳng binary build sẵn từ GitHub Release rồi copy vào `/usr/local/bin` — không tải source code, không cần Go trên máy đích:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install.sh | bash
 ```
 
-Tự nhận diện kiến trúc máy (Apple Silicon hay Intel). Muốn chỉ định thẳng thay vì tự nhận diện:
+Script tự nhận diện kiến trúc máy. Muốn chỉ định thẳng:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-arm64.sh | bash   # Apple Silicon (M1/M2/M3...)
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-intel.sh | bash   # Mac Intel
 ```
 
-Cả 3 cách đều cài `vpn` vào `/usr/local/bin` (setuid-root — xem phần dưới), sau đó dùng không cần gõ `sudo` nữa.
+Installer sẽ:
+1. Cài CLI vào `/usr/local/bin/vpn` (setuid-root, xem [Bảo mật](#bảo-mật)). Sau bước này không cần gõ `sudo` nữa.
+2. Cài app vào `/Applications/TMS VPN.app` rồi mở app.
 
-Installer đối chiếu CLI và app với `SHA256SUMS` của release, nên chống được file tải về bị hỏng. Nhưng vì chính script cũng được tải từ repo này, nó **không** chống được trường hợp repo bị chiếm. `vpn update` thì mạnh hơn: nó verify chữ ký ed25519 của release bằng public key nhúng sẵn trong binary đang cài (xem mục Phát hành).
+Cả CLI lẫn app đều được đối chiếu với `SHA256SUMS` của release. File nào không khớp thì không được cài.
 
-## Setup lần đầu
-
-Mở app **TMS VPN** trên menu bar → **+ Thêm điểm nối**, nhập server, tài khoản, mật khẩu, PSK. App gọi CLI để lưu, PSK/password nằm trong Keychain.
-
-Hoặc từ terminal:
+**Kiểm tra cài xong:**
 
 ```bash
-vpn profile add <tên> --server <host>       # hỏi PSK nếu không truyền --psk
-vpn account add <tên> <username> --default  # hỏi password nếu không truyền --password
+vpn version           # in ra phiên bản, ví dụ: vpn v1.0.0
+```
+
+Biểu tượng TMS VPN sẽ xuất hiện trên menu bar.
+
+## Kết nối lần đầu
+
+### Cách 1: qua app (khuyến nghị)
+
+1. Bấm biểu tượng **TMS VPN** trên menu bar, chọn **Thêm**.
+2. Nhập **Tên điểm nối** (tuỳ đặt), **Địa chỉ máy chủ**, **Tài khoản**, **Mật khẩu**, **PSK**.
+3. Giữ bật **Gửi toàn bộ lưu lượng qua VPN** nếu muốn mọi traffic đi qua VPN (xem [Full tunnel và split tunnel](#full-tunnel-và-split-tunnel)).
+4. Bật **công tắc** bên phải hồ sơ để kết nối (tắt công tắc để ngắt). Khi thành công, app hiện **ĐANG HOẠT ĐỘNG** kèm IP được cấp.
+
+Muốn sửa hoặc xoá hồ sơ, mở menu bên cạnh công tắc rồi chọn **Chỉnh sửa** hoặc **Xóa hồ sơ**.
+
+PSK và mật khẩu được lưu trong **Keychain** của macOS, không nằm trong file cấu hình.
+
+### Cách 2: qua terminal
+
+```bash
+vpn profile add work --server vpn.example.com       # hỏi PSK (không hiện ký tự khi gõ)
+vpn account add work nguyenvana --default           # hỏi password
+vpn connect                                         # tự chạy nền, trả lại terminal khi biết kết quả
+```
+
+`vpn connect` chỉ chờ tới khi kết nối thành công hoặc thất bại rồi trả lại terminal. Tiến trình VPN vẫn chạy nền cho tới khi bạn `vpn disconnect`.
+
+> Tránh truyền `--psk`/`--password` trên dòng lệnh: chúng nằm lại trong shell history, và user khác trên máy xem được qua `ps`. Cứ để CLI hỏi.
+
+### Kiểm tra đã thật sự đi qua VPN
+
+```bash
+vpn status                     # Phase: CONNECTED, kèm tunnel (utunN) và IP được cấp
+curl -4 https://ifconfig.co    # phải ra IP của VPN, không phải IP mạng bạn đang dùng
 ```
 
 ## Dùng hằng ngày
 
 ```bash
-vpn connect       # kết nối, tự chạy nền — trả lại terminal ngay khi biết kết quả, không cần sudo
-vpn disconnect    # ngắt
-vpn status        # xem đang connected hay chưa
+vpn connect                    # kết nối profile đang active
+vpn connect --profile home     # kết nối profile khác
+vpn disconnect
+vpn status
 ```
 
-`vpn connect` luôn tự tách tiến trình chạy nền (không cần `&`) — lệnh chỉ đứng chờ tới khi biết chắc kết nối thành công hay thất bại rồi mới trả lại terminal, sau đó tiến trình vẫn tiếp tục chạy nền cho tới khi bạn `vpn disconnect`.
+Khi đang kết nối, client tự **rekey** khoá mã hoá trước khi hết hạn, khoảng mỗi 30 phút. Việc này không làm rớt kết nối và không phải đăng nhập lại.
 
-### Vì sao không cần sudo
+## Profile và account
 
-Khi cài, installer ghi UID của người vừa chạy vào file root-only
-`/etc/vpn-owner-uid`; binary đọc file này lúc chạy. Cách này cho phép cùng
-binary build sẵn từ CI dùng cho mọi máy, nhưng vẫn chỉ cho user đã cài chạy.
-Binary tự hạ quyền về user thường ngay
-khi khởi động, chỉ tạm nâng lại quyền root đúng lúc thật sự cần (mở utun, bind
-UDP/500, đổi route/DNS) rồi hạ ngay sau đó — không giữ quyền root suốt phiên
-kết nối. **Chỉ đúng user đã cài mới gọi được `vpn`** — user khác trên máy chạy
-lệnh này sẽ bị từ chối ngay lập tức, kể cả các lệnh không cần quyền root.
-
-## Nhiều server
+- Một **profile** là một server: địa chỉ, PSK, chế độ tunnel.
+- Mỗi profile có thể có **nhiều account**; một trong số đó là **default**.
+- **Profile active** là profile `vpn connect` dùng khi không có `--profile`. Đó là profile được thêm đầu tiên; khi profile active bị xoá, profile đứng đầu theo thứ tự tên sẽ thay thế.
 
 ```bash
-vpn profile add <tên> --server <host>       # thêm server khác
-vpn profile remove <tên>                    # xoá profile (kèm PSK/password trong Keychain)
-vpn connect --profile <tên>                 # kết nối vào profile cụ thể
+vpn profile list                           # * = profile active / account default
+vpn profile add <tên> --server <host>      # thêm, hoặc cập nhật nếu tên đã có (giữ nguyên các account)
+vpn profile remove <tên>                   # xoá profile, kèm PSK và password trong Keychain
+vpn account add <profile> <user> --default # thêm account, đặt làm default
+vpn connect --profile <tên> --account <user>
 ```
 
-Chọn server, bật/tắt kết nối và sửa hồ sơ hằng ngày thì dùng app TMS VPN trên menu bar.
+### Full tunnel và split tunnel
+
+| | Full tunnel (mặc định) | Split tunnel (`--full-tunnel=false`) |
+|---|---|---|
+| Traffic IPv4 | Tất cả qua VPN | Chỉ tới server VPN (đầu bên kia tunnel) và DNS server được cấp |
+| IPv6 | **Bị chặn** (tunnel chỉ mang IPv4, chặn để IPv6 không lọt ra ngoài) | Đi mạng thường |
+| DNS | DNS server do VPN cấp | DNS server do VPN cấp, route qua tunnel |
+
+Nếu server không cấp DNS, `vpn connect` và `vpn status` sẽ cảnh báo: truy vấn DNS vẫn đi tới resolver của mạng hiện tại, nên mạng đó thấy được các tên miền bạn truy cập.
+
+### Tuỳ chọn nâng cao của `profile add`
+
+| Flag | Ý nghĩa |
+|---|---|
+| `--server-id <id>` | ID mà server phải tự khai trong IKE (IP hoặc FQDN). Để trống thì chấp nhận mọi ID |
+| `--mtu <n>` | MTU của tunnel, mặc định 1400 |
+| `--full-tunnel=false` | Split tunnel |
 
 ## Sự cố
 
 ```bash
-vpn diagnose   # kiểm tra mạng trước khi connect, không đổi gì trên máy
-vpn repair     # dọn route/DNS nếu connect bị crash/kill giữa chừng
-vpn logs -f    # xem log
+vpn diagnose      # kiểm tra mạng, DNS, UDP 500/4500, MTU trước khi connect; không thay đổi gì trên máy
+vpn logs -f       # xem log; thêm chi tiết bằng: vpn connect --verbose
+vpn repair        # dọn route/DNS nếu vpn bị crash hoặc bị kill giữa chừng
 ```
+
+### Mã lỗi thường gặp
+
+Lỗi hiện ra dạng `STAGE: mô tả: chi tiết`. Đọc phần **chi tiết** để biết nguyên nhân cụ thể.
+
+| Mã / nội dung | Nguyên nhân thường gặp | Cách xử lý |
+|---|---|---|
+| `IKE_TIMEOUT` + `IKE_AUTH_FAILED` / `HASH_R mismatch` | Sai PSK | Kiểm tra lại PSK với admin, rồi chạy `vpn profile add <tên> --server <host>` để nhập lại |
+| `IKE_TIMEOUT` + `no response` | Server không trả lời, hoặc mạng chặn UDP 500/4500 | `vpn diagnose`; thử mạng khác (4G/hotspot) |
+| `IKE_TIMEOUT` + `IKE_PROPOSAL_MISMATCH` | Server không chấp nhận bộ thuật toán nào client đề xuất | Báo admin kèm `vpn logs` |
+| `PPP_AUTH_FAILURE` + `CHAP authentication rejected` | Sai username/password | `vpn account add <profile> <user>` để nhập lại |
+| `already logged in` | Phiên cũ trên server chưa hết | App tự thử lại. Với CLI, đợi vài giây rồi `vpn connect` lại |
+| `authenticator response mismatch` | Server **không chứng minh được** nó biết mật khẩu của bạn, có thể bị giả mạo | **Đừng nhập lại mật khẩu.** Đổi mạng và báo admin |
+| `L2TP_TIMEOUT`, `LCP_FAILED`, `IPCP_FAILURE` | Server nhận IPsec nhưng lỗi ở tầng L2TP/PPP | Báo admin kèm `vpn logs` |
+| `DNS_FAILURE` + `resolve VPN server` | Không phân giải được tên server | Kiểm tra mạng, hoặc dùng IP thay cho tên |
+| `ROUTE_FAILURE`, `TUN_FAILURE` | Lỗi cấu hình mạng trên máy | `vpn repair` rồi thử lại |
+| `TUNNEL_FAILURE` | Tunnel đang chạy thì rớt. **Traffic hiện đi mạng thường, không được bảo vệ** | `vpn connect` lại |
+| `installed by a different user` | Chỉ user đã cài mới chạy được `vpn` | Dùng đúng user đó, hoặc cài lại |
+| `no account selected` / `no PSK stored` | Profile thiếu account hoặc thiếu secret | Làm theo lệnh gợi ý trong thông báo lỗi |
+
+### File nằm ở đâu
+
+| Đường dẫn | Nội dung |
+|---|---|
+| `~/.config/vpn/config.json` | Profile, account, tuỳ chọn (không chứa secret) |
+| Keychain: `vpn.psk.<profile>`, `vpn.pwd.<profile>.<account>` | PSK và password |
+| `/var/log/vpn.log`, `/var/log/vpn.log.1` | Log (tự xoay vòng khi vượt 5 MiB) |
+| `/var/run/vpn/state.json` | Trạng thái kết nối hiện tại (app đọc file này) |
+| `/etc/vpn-owner-uid` | UID của user đã cài |
 
 ## Cập nhật / gỡ cài đặt
 
 ```bash
-vpn update       # tải release mới nhất, verify chữ ký + SHA-256, chỉ cài nếu mới hơn bản đang chạy
-vpn uninstall    # xoá sạch: binary, log, state, toàn bộ profile/account (kể cả PSK/password trong Keychain)
+vpn update        # chỉ cập nhật CLI: verify chữ ký + SHA-256, chỉ cài nếu mới hơn bản đang chạy
 ```
+
+Muốn cập nhật **cả app**, chạy lại lệnh cài ở trên.
+
+| Lệnh | Gỡ gì |
+|---|---|
+| `vpn uninstall` | CLI, log, state, toàn bộ profile/account kèm secret trong Keychain. **App vẫn còn** |
+| `uninstall.sh` (trong repo) | Tất cả những thứ trên **và** app |
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/uninstall.sh | bash
+```
+
+## Bảo mật
+
+### Vì sao không cần sudo
+
+Khi cài, installer ghi UID của người vừa chạy vào file root-only `/etc/vpn-owner-uid`; binary đọc file này lúc chạy. Cách này cho phép cùng một binary build sẵn từ CI dùng được cho mọi máy, nhưng vẫn chỉ user đã cài mới chạy được.
+
+Binary tự hạ quyền về user thường ngay khi khởi động, và chỉ tạm nâng lại quyền root đúng lúc cần (mở utun, bind UDP/500, đổi route/DNS). Nó không giữ quyền root suốt phiên kết nối. **Chỉ đúng user đã cài mới gọi được `vpn`**; user khác trên máy chạy lệnh này sẽ bị từ chối ngay, kể cả với các lệnh không cần quyền root.
+
+### Những gì client bảo vệ
+
+- **Traffic:** full tunnel đưa toàn bộ IPv4 qua VPN và chặn IPv6. ESP dùng đúng thuật toán đã negotiate với server (AES hoặc 3DES, HMAC-SHA256 hoặc SHA1).
+- **Xác thực server:** kiểm tra `S=` của MS-CHAPv2, nên ai chỉ có PSK (vốn thường dùng chung) cũng không giả được server.
+- **Secret:** nằm trong Keychain. Secret được truyền cho `security` qua stdin, nên không lộ qua `ps`. Log không ghi payload đã giải mã.
+- **Cập nhật:** `vpn update` verify chữ ký ed25519 của release bằng public key nhúng sẵn trong binary đang cài. Installer chỉ kiểm tra `SHA256SUMS`: chống được file tải về bị hỏng, nhưng không chống được việc repo bị chiếm, vì chính script cũng tải từ repo này.
+
+## Dành cho developer
+
+### Cấu trúc repo
+
+| Đường dẫn | Nội dung |
+|---|---|
+| `cmd/vpn` | Entry point của CLI |
+| `internal/ike`, `ipsec`, `l2tp`, `ppp` | Các tầng giao thức: IKEv1, ESP, L2TP, PPP/MS-CHAPv2 |
+| `internal/engine` | Điều phối kết nối, data plane, rekey |
+| `internal/routing`, `dnsmgr`, `tun` | Route, DNS, thiết bị utun của macOS |
+| `internal/cli`, `config`, `keychain`, `state` | Lệnh CLI, cấu hình, Keychain, file trạng thái |
+| `internal/privilege`, `sysbin`, `release` | setuid, đường dẫn lệnh hệ thống, ký release |
+| `cmd/releasesign` | Công cụ ký release (dùng trong CI) |
+| `main.swift`, `build.sh` | App menu bar (Swift) và script build |
+| `src/`, `index.html`, `package.json` | **Prototype giao diện** (React/Vite, chạy bằng dữ liệu giả), không phải app thật |
+
+### Yêu cầu
+
+- Go theo `go.mod` (hiện là 1.27): `brew install go`.
+- App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ.
+- Prototype (tuỳ chọn): [bun](https://bun.sh).
+
+### Build và cài bản local
+
+```bash
+go build -o vpn ./cmd/vpn
+sudo install -o root -g wheel -m 4755 vpn /usr/local/bin/vpn       # setuid-root, giống installer
+id -u | sudo tee /etc/vpn-owner-uid >/dev/null && sudo chmod 600 /etc/vpn-owner-uid
+
+bash build.sh                  # app: build/TMS VPN.app (universal arm64 + x86_64)
+```
+
+### Test
+
+```bash
+go vet ./... && go test ./...                      # CI chạy gofmt, vet và test trên macOS
+go test -tags keychain_live ./internal/keychain    # ghi và đọc thật vào login Keychain (chỉ chạy tay)
+vpn connect --verbose --rekey-after 90s            # test live: ép rekey mỗi 90 giây
+```
+
+### Prototype giao diện
+
+```bash
+bun install && bun run dev     # http://localhost:3000
+```
+
+Prototype chỉ là mockup để thiết kế UI. Đoạn `main.swift` hiển thị trong đó là bản chụp minh hoạ; mã nguồn thật là `main.swift` ở gốc repo.
 
 ## Phát hành
 
@@ -93,3 +263,5 @@ Khóa ký nằm trong secret `RELEASE_SIGNING_KEY` của repo (base64 seed ed255
 ```bash
 go run ./cmd/releasesign keygen   # stdout: seed → secret; stderr: public key → release.PublicKey
 ```
+
+`install.sh` cần `SHA256SUMS` của release mới nhất, nên phải có ít nhất một release được tạo từ tag thì lệnh cài ở đầu README mới chạy được.

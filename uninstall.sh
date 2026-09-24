@@ -28,7 +28,13 @@ echo "=================================================="
 echo "⏹️ [1/3] Quitting Menu Bar UI..."
 killall "TMS VPN" 2>/dev/null || true
 
-echo "📂 [2/3] Removing CLI engine, state, log, profiles and Keychain secrets..."
+# The app goes first, so `vpn uninstall` below no longer sees it and does
+# not print its "the menu bar app is still installed" hint.
+echo "🎨 [2/3] Removing Menu Bar app..."
+rm -rf "$APP_DIR" 2>/dev/null || sudo rm -rf "$APP_DIR"
+sudo rm -f "/usr/local/bin/tms-vpn-bar"
+
+echo "📂 [3/3] Removing CLI engine, state, log, profiles and Keychain secrets..."
 if [ -x "$CLI" ] && "$CLI" uninstall -y; then
   :
 else
@@ -47,10 +53,6 @@ else
   sudo rm -rf /var/run/vpn
   rm -rf "$HOME/.config/vpn"
 fi
-
-echo "🎨 [3/3] Removing Menu Bar app..."
-rm -rf "$APP_DIR" 2>/dev/null || sudo rm -rf "$APP_DIR"
-sudo rm -f "/usr/local/bin/tms-vpn-bar"
 
 echo "=================================================="
 echo "✅ TMS VPN has been completely uninstalled!"
