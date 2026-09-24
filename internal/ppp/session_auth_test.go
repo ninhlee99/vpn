@@ -71,7 +71,7 @@ func runAuthAgainst(t *testing.T, lns Transport) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return runAuth(ctx, lns, "alice", "correct horse")
+	return runAuth(ctx, lns, "alice", "correct horse", 0)
 }
 
 func TestRunAuthAcceptsGenuineAuthenticator(t *testing.T) {

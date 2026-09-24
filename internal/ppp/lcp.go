@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+
+	"vpn/internal/vpnlog"
 )
 
 // LCP option types, RFC 1661 §6.
@@ -93,4 +95,54 @@ func CHAPAuthProtocolOption(algorithm uint8) Option {
 	binary.BigEndian.PutUint16(data[0:2], ProtoCHAP)
 	data[2] = algorithm
 	return Option{Type: OptAuthProtocol, Data: data}
+}
+
+// magicOf returns the Magic-Number among opts, or 0 when there is none —
+// the value RFC 1661 §6.4 has a side use when it has not negotiated one
+// (e.g. the peer Configure-Rejected ours).
+func magicOf(opts []Option) uint32 {
+	for _, o := range opts {
+		if o.Type == OptMagicNumber && len(o.Data) == 4 {
+			return binary.BigEndian.Uint32(o.Data)
+		}
+	}
+	return 0
+}
+
+// EchoReply answers an LCP Echo-Request (RFC 1661 §5.8). The reply's
+// Magic-Number is the replier's own, never the requester's: pppd discards
+// a reply carrying its own magic as a looped-back packet ("appear to have
+// received our own echo-reply"), so a reply that just echoed the request
+// back counts as no reply at all, and after lcp-echo-failure misses in a
+// row (4 x 30s in the common xl2tpd/pppd setup) the LNS tears the link
+// down.
+func EchoReply(req ControlPacket, magic uint32) ControlPacket {
+	data := make([]byte, 4, 4+len(req.Data))
+	binary.BigEndian.PutUint32(data, magic)
+	if len(req.Data) > 4 {
+		data = append(data, req.Data[4:]...)
+	}
+	return ControlPacket{Code: CodeEchoReply, Identifier: req.Identifier, Data: data}
+}
+
+// HandleOpenedLCP answers the LCP packets the peer can still send once
+// LCP is Opened — during authentication and for the rest of the session:
+// Echo-Requests (its keepalive) and a retransmitted Configure-Request
+// (our earlier Ack to it was lost; left unacked, the peer's LCP state
+// machine stays stuck — reproduced live as a CHAP Challenge that never
+// came). magic is ours from Result.Magic. Anything else, including
+// unparsable packets, is ignored.
+func HandleOpenedLCP(t Transport, payload []byte, magic uint32) {
+	pkt, err := ParseControlPacket(payload)
+	if err != nil {
+		return
+	}
+	switch pkt.Code {
+	case CodeEchoRequest:
+		err := t.SendFrame(ProtoLCP, EchoReply(pkt, magic).Marshal())
+		vpnlog.Debug(stage, "answered LCP Echo-Request", vpnlog.Fields{"id": pkt.Identifier, "err": err})
+	case CodeConfigureRequest:
+		reply := ControlPacket{Code: CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
+		_ = t.SendFrame(ProtoLCP, reply.Marshal())
+	}
 }

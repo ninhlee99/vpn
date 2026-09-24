@@ -30,6 +30,9 @@ type Config struct {
 // Result is everything the engine needs once PPP reaches the OPENED state.
 type Result struct {
 	IPCP NegotiatedIPCP
+	// Magic is our LCP Magic-Number as negotiated (0 if the peer rejected
+	// it), for answering the peer's Echo-Requests (see HandleOpenedLCP).
+	Magic uint32
 }
 
 // Run drives DEAD -> ESTABLISH (LCP) -> AUTHENTICATE (MS-CHAPv2) ->
@@ -48,12 +51,13 @@ func Run(ctx context.Context, t Transport, cfg Config) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := runLCP(ctx, t, lcp); err != nil {
+	magic, err := runLCP(ctx, t, lcp)
+	if err != nil {
 		return nil, fmt.Errorf("LCP_FAILED: %w", err)
 	}
 	vpnlog.Info(stage, "LCP established", vpnlog.Fields{"mru": cfg.MRU})
 
-	if err := runAuth(ctx, t, cfg.Username, cfg.Password); err != nil {
+	if err := runAuth(ctx, t, cfg.Username, cfg.Password, magic); err != nil {
 		return nil, fmt.Errorf("PPP_AUTH_FAILURE: %w", err)
 	}
 	vpnlog.Info(stage, "MS-CHAPv2 authentication succeeded", nil)
@@ -64,7 +68,7 @@ func Run(ctx context.Context, t Transport, cfg Config) (*Result, error) {
 	}
 	vpnlog.Info(stage, "IPCP established", vpnlog.Fields{"local_ip": ipcp.LocalIP.String()})
 
-	return &Result{IPCP: *ipcp}, nil
+	return &Result{IPCP: *ipcp, Magic: magic}, nil
 }
 
 // negotiatePhase runs one side-agnostic RFC 1661 §4 option-negotiation loop
@@ -175,10 +179,9 @@ func negotiatePhase(
 				return nil, err
 			}
 		case CodeEchoRequest:
-			// LCP keepalive from the peer — reply so it doesn't tear down
-			// the link thinking we vanished.
-			reply := ControlPacket{Code: CodeEchoReply, Identifier: pkt.Identifier, Data: pkt.Data}
-			_ = t.SendFrame(protocol, reply.Marshal())
+			// LCP keepalive from a peer already Opened on its side — reply
+			// so it doesn't tear down the link thinking we vanished.
+			_ = t.SendFrame(protocol, EchoReply(pkt, magicOf(ourOptions)).Marshal())
 		}
 	}
 	return ourOptions, nil
@@ -220,8 +223,10 @@ func dropRejected(ours []Option, rejected []Option) []Option {
 	return out
 }
 
-func runLCP(ctx context.Context, t Transport, cfg LCPConfig) error {
-	_, err := negotiatePhase(ctx, t, ProtoLCP,
+// runLCP returns our Magic-Number as the peer finally acked it (0 if it
+// rejected the option).
+func runLCP(ctx context.Context, t Transport, cfg LCPConfig) (uint32, error) {
+	ourOptions, err := negotiatePhase(ctx, t, ProtoLCP,
 		cfg.ConfigureRequestOptions,
 		func(opts []Option) ([]Option, bool) {
 			// Accept the peer's Configure-Request as-is — this client has
@@ -230,7 +235,10 @@ func runLCP(ctx context.Context, t Transport, cfg LCPConfig) error {
 			// LNS will challenge us with, handled in runAuth, not here.
 			return opts, true
 		})
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return magicOf(ourOptions), nil
 }
 
 func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
@@ -299,7 +307,7 @@ func Terminate(t Transport, id uint8) {
 	}
 }
 
-func runAuth(ctx context.Context, t Transport, username, password string) error {
+func runAuth(ctx context.Context, t Transport, username, password string, magic uint32) error {
 	// Every Response sent so far. A retransmitted Challenge gets a fresh
 	// Response (new PeerChallenge), but the LNS may still answer an earlier
 	// one — e.g. pppd resends the Success it already computed for Response
@@ -328,11 +336,9 @@ func runAuth(ctx context.Context, t Transport, username, password string) error 
 			// as an endless "timed out waiting for CHAP Challenge" while
 			// the log showed the peer's identical Configure-Request on
 			// repeat. Keep acking it here too so the peer's LCP actually
-			// converges.
-			if pkt, err := ParseControlPacket(payload); err == nil && pkt.Code == CodeConfigureRequest {
-				reply := ControlPacket{Code: CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
-				_ = t.SendFrame(ProtoLCP, reply.Marshal())
-			}
+			// converges — and answer its Echo-Requests, which start as soon
+			// as its LCP is Opened.
+			HandleOpenedLCP(t, payload, magic)
 			continue
 		}
 		if proto != ProtoCHAP {
