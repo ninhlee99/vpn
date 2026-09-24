@@ -69,16 +69,17 @@ vpn disconnect
 vpn status
 ```
 
-Khoá mã hoá được tự làm mới định kỳ trong lúc kết nối, không làm rớt phiên và không cần đăng nhập lại. Khi mất kết nối, client tự nối lại; `vpn status` hiện `Reconnecting` trong lúc đó.
+Khoá mã hoá được tự làm mới định kỳ trong lúc kết nối, không làm rớt phiên và không cần đăng nhập lại. Khi mất kết nối, client tự nối lại; `vpn status` hiện `Reconnecting` trong lúc đó. `vpn connect` cho profile đang kết nối là no-op — dùng `vpn connect --force` để ép nối lại.
 
 ## Profile và account
 
 - **Profile** = một server (địa chỉ, PSK, chế độ tunnel). Mỗi profile có thể có nhiều **account**, một trong số đó là default.
-- **Profile active** là profile `vpn connect` dùng khi không truyền `--profile`.
+- **Profile active** là profile `vpn connect` dùng khi không truyền `--profile`. Xoá profile active thì profile khác (theo thứ tự tên) tự thành active.
 
 ```bash
 vpn profile list                           # * = profile / account đang active
 vpn profile add <tên> --server <host>      # thêm, hoặc cập nhật nếu tên đã có
+vpn profile rename <tên> [display name]    # đổi tên hiển thị trong app, không đổi secret đã lưu
 vpn profile remove <tên>
 vpn account add <profile> <user> --default
 vpn connect --profile <tên> --account <user>
@@ -92,7 +93,7 @@ vpn connect --profile <tên> --account <user>
 | IPv6 | Bị chặn | Đi mạng thường |
 | DNS | DNS do VPN cấp | DNS do VPN cấp, route qua tunnel |
 
-Nếu server không cấp DNS, `vpn connect`/`vpn status` sẽ cảnh báo: DNS vẫn đi qua resolver của mạng hiện tại.
+Ở full tunnel, nếu server không cấp DNS, `vpn connect`/`vpn status` sẽ cảnh báo: DNS vẫn đi qua resolver của mạng hiện tại thay vì qua VPN.
 
 ### Tuỳ chọn nâng cao của `profile add`
 
@@ -141,6 +142,7 @@ Lỗi hiện ra dạng `STAGE: mô tả: chi tiết` — đọc phần chi tiế
 | Đường dẫn | Nội dung |
 |---|---|
 | `~/.config/vpn/config.json` | Profile, account, tuỳ chọn (không chứa secret) |
+| `~/.config/vpn/session.json` | ID phiên L2TP gần nhất, dùng để tự nối lại nhanh hơn sau khi mất kết nối đột ngột |
 | Keychain: `vpn.psk.<profile>`, `vpn.pwd.<profile>.<account>` | PSK và password |
 | `/var/log/vpn.log`, `/var/log/vpn.log.1` | Log (tự xoay vòng) |
 | `/var/run/vpn/state.json` | Trạng thái kết nối hiện tại |
@@ -180,10 +182,11 @@ CLI cài setuid-root, nhưng tự hạ quyền về user thường ngay khi kh�
 |---|---|
 | `cmd/vpn` | Entry point của CLI |
 | `internal/ike`, `ipsec`, `l2tp`, `ppp` | Các tầng giao thức: IKEv1, ESP, L2TP, PPP/MS-CHAPv2 |
-| `internal/engine` | Điều phối kết nối, data plane, rekey |
-| `internal/routing`, `dnsmgr`, `tun` | Route, DNS, thiết bị utun của macOS |
+| `internal/engine` | Điều phối kết nối: data plane, rekey, tự nối lại, kill switch |
+| `internal/routing`, `dnsmgr`, `tun`, `netwatch` | Route, DNS, thiết bị utun và theo dõi sự kiện mạng của macOS |
 | `internal/cli`, `config`, `keychain`, `state` | Lệnh CLI, cấu hình, Keychain, file trạng thái |
-| `internal/privilege`, `sysbin`, `release` | setuid, đường dẫn lệnh hệ thống, ký release |
+| `internal/diagnostics` | Backend của `vpn diagnose` |
+| `internal/privilege`, `sysbin`, `release`, `vpnlog` | setuid, đường dẫn lệnh hệ thống, ký release, log |
 | `cmd/releasesign` | Công cụ ký release (dùng trong CI) |
 | `main.swift`, `build.sh` | App menu bar (Swift) và script build |
 | `src/`, `index.html`, `package.json` | Prototype giao diện (React/Vite, dữ liệu giả) — không phải app thật |
