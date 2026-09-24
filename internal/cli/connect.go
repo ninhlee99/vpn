@@ -142,6 +142,7 @@ type connectTarget struct {
 	profileName string
 	profile     *config.Profile
 	accountName string
+	mtu         int // config.EffectiveMTU: the global setting, else the profile's
 }
 
 // resolveTarget resolves the profile and account a connect would use —
@@ -159,7 +160,7 @@ func resolveTarget(profileName, accountName string) (*connectTarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("profile %q: %w — run `vpn account add %s <username> --default`", pName, err, pName)
 	}
-	return &connectTarget{profileName: pName, profile: p, accountName: aName}, nil
+	return &connectTarget{profileName: pName, profile: p, accountName: aName, mtu: cfg.EffectiveMTU(p)}, nil
 }
 
 // checkSecretsStored confirms the PSK and password exist in Keychain
@@ -215,7 +216,7 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 		PSK:          psk,
 		IKEProposals: p.IKEProposals,
 		ESPProposals: p.ESPProposals,
-		MTU:          p.MTU,
+		MTU:          t.mtu,
 		FullTunnel:   p.FullTunnel,
 		Timeout:      timeout,
 		Verbose:      verbose,

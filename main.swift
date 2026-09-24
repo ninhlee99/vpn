@@ -16,6 +16,7 @@ struct CLIProfile: Codable {
 }
 
 struct CLIConfig: Codable {
+    var mtu: Int?
     var active_profile: String?
     var profiles: [String: CLIProfile]?
 }
@@ -68,6 +69,8 @@ final class VPNManager: ObservableObject {
 
     @Published var profiles: [VPNProfileItem] = []
     @Published var activeProfileName: String?
+    /// Tunnel MTU shared by every profile (`vpn mtu`); 1280 or 1400.
+    @Published var mtu: Int = 1400
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
     @Published var currentPhase: String = "DISCONNECTED"
@@ -228,6 +231,7 @@ final class VPNManager: ObservableObject {
                 activeProf = cfg.active_profile
             }
             update(\.activeProfileName, activeProf)
+            update(\.mtu, cfg.mtu ?? 1400)
 
             var items: [VPNProfileItem] = []
             for (pName, pVal) in cfg.profiles ?? [:] {
@@ -522,6 +526,17 @@ final class VPNManager: ObservableObject {
         operationQueue.async {
             Self.run(cli, ["disconnect"])
             Task { @MainActor in self.endIntent(id) }
+        }
+    }
+
+    /// Applies to every profile; takes effect on the next connect, not the running tunnel.
+    func setMTU(_ value: Int) {
+        guard value == 1280 || value == 1400 else { return }
+        update(\.mtu, value)
+        let cli = self.cli
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Self.run(cli, ["mtu", String(value)])
+            Task { @MainActor in self?.syncFromDisk() }
         }
     }
 
@@ -1112,6 +1127,19 @@ struct MenuBarPopupView: View {
                     .foregroundColor(Color.gray.opacity(0.7))
 
                 Spacer()
+
+                Text("MTU")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.gray.opacity(0.7))
+                Picker("", selection: Binding(get: { vpn.mtu }, set: { vpn.setMTU($0) })) {
+                    Text("1280").tag(1280)
+                    Text("1400").tag(1400)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 100)
+                .help("MTU cho mọi profile. Áp dụng ở lần kết nối tiếp theo. Dùng 1280 nếu mạng hay bị đứng khi tải lớn.")
+                .padding(.trailing, 8)
 
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     HStack(spacing: 5) {
