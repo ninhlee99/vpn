@@ -587,11 +587,13 @@ struct TracingBorder: View {
     var period: Double
     var lineWidth: CGFloat = 1.6
     var tailLength: CGFloat = 0.3
+    /// Minimum seconds between frames; nil follows the display's refresh rate.
+    var frameInterval: Double? = nil
 
     private let tailSteps = 8
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: frameInterval)) { timeline in
             let t = timeline.date.timeIntervalSinceReferenceDate
             let head = CGFloat((t / period).truncatingRemainder(dividingBy: 1))
             ZStack {
@@ -620,19 +622,21 @@ struct TracingBorder: View {
 /// Outline for a card / badge: faint idle stroke, then a comet travelling the
 /// border — amber while connecting, green once connected, with the same speed
 /// and tail in both so success reads as a continuation of the same motion.
-/// Callers that are always on screen (the menu bar icon) opt out of the
-/// connected comet. Crossfades between states.
+/// Crossfades between states.
 struct StatusBorder: View {
     var state: LinkState
     var cornerRadius: CGFloat
     var idleColor: Color = Color.white.opacity(0.08)
     var lineWidth: CGFloat = 1.6
-    var tracesWhenConnected: Bool = true
+    /// Passed to TracingBorder: throttles the comet's frame rate (nil = display rate).
+    var frameInterval: Double? = nil
 
     /// One lap of the comet, in seconds, and its tail as a fraction of the
     /// perimeter — shared by the connecting and connected states.
     static let cometPeriod: Double = 1.8
     static let cometTail: CGFloat = 0.35
+    /// Frame cap for the always-visible menu bar icon.
+    static let menuBarFrameInterval: Double = 1.0 / 30
 
     var body: some View {
         ZStack {
@@ -641,11 +645,13 @@ struct StatusBorder: View {
 
             if state == .connecting {
                 TracingBorder(cornerRadius: cornerRadius, color: VPNColors.amber, highlight: VPNColors.amberBright,
-                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail)
+                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail,
+                              frameInterval: frameInterval)
                     .transition(.opacity)
-            } else if state == .connected && tracesWhenConnected {
+            } else if state == .connected {
                 TracingBorder(cornerRadius: cornerRadius, color: VPNColors.green, highlight: VPNColors.greenBright,
-                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail)
+                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail,
+                              frameInterval: frameInterval)
                     .transition(.opacity)
             }
         }
@@ -733,10 +739,11 @@ struct MacOSMenuBar: View {
                         .transition(.opacity)
                 }
 
-                // Connected stays static in the menu bar: an always-visible 60fps loop
-                // would keep the app redrawing for as long as the tunnel is up.
+                // The menu bar icon is always on screen, so its comet keeps the app
+                // redrawing for as long as the tunnel is up: cap it at 30fps (plenty
+                // for a 22px icon) instead of the display's 60-120Hz.
                 StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15),
-                             lineWidth: 1.5, tracesWhenConnected: false)
+                             lineWidth: 1.5, frameInterval: StatusBorder.menuBarFrameInterval)
 
                 Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield"))
                     .font(.system(size: 13, weight: .semibold))

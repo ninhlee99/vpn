@@ -54,6 +54,8 @@ export const MacOSMenuBar: React.FC<MacOSMenuBarProps> = ({
       case 'connected':
         return (
           <div className="relative p-1 rounded-lg border border-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.6)] bg-emerald-950/50 flex items-center justify-center">
+            {/* Same comet as while connecting, in green — mirrors main.swift's menu bar icon */}
+            <TracingBorder tone="green" radius={8} period={1.6} strokeWidth={1.5} tail={0.45} />
             <ShieldCheck className="w-[15px] h-[15px] text-emerald-400 fill-emerald-400/30 filter drop-shadow-[0_0_4px_rgba(52,211,153,0.6)]" />
             <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_#34d399]" />
           </div>
