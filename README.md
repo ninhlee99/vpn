@@ -138,7 +138,7 @@ vpn mtu          # xem MTU hiện tại
 vpn mtu 1280     # đặt cho tất cả profile (chỉ nhận 1280 hoặc 1400)
 ```
 
-Áp dụng ở lần `connect` tiếp theo. Dùng 1280 khi mạng hay bị đứng lúc tải dữ liệu lớn (hotspot, PPPoE); 1400 là mặc định. Menu bar app có ô chọn MTU ở hàng cài đặt phía trên chân cửa sổ.
+Áp dụng ở lần `connect` tiếp theo. Dùng 1280 khi mạng hay bị đứng lúc tải dữ liệu lớn (hotspot, PPPoE); 1400 là mặc định. Menu bar app có ô chọn MTU trong Settings (biểu tượng bánh răng).
 
 ### Log chi tiết
 
@@ -147,7 +147,7 @@ vpn verbose        # xem: on/off (mặc định off)
 vpn verbose on     # ghi thêm chi tiết giao thức khi cần chẩn đoán
 ```
 
-Mốc kết nối (IKE/L2TP/PPP, rekey, "tunnel alive" mỗi phút, sự kiện mạng, lý do rớt) và lỗi luôn được ghi. Mặc định tắt; bật verbose thì có thêm chi tiết giao thức (bắt tay, retransmit, gói bị bỏ); không bao giờ ghi từng gói dữ liệu, để đỡ ghi SSD. Áp dụng ở lần `connect` tiếp theo; log giới hạn dung lượng (xoay vòng 8 MB, tối đa 16 MB mỗi phiên). Menu bar app có công tắc "Verbose log" trong Settings (biểu tượng bánh răng).
+Mốc kết nối và lỗi luôn được ghi. Verbose (mặc định tắt) ghi thêm chi tiết giao thức để chẩn đoán, không ghi payload đã giải mã. Áp dụng ở lần `connect` tiếp theo. Menu bar app có công tắc "Verbose log" trong Settings (biểu tượng bánh răng).
 
 ### Kill switch (tùy chọn)
 
@@ -156,22 +156,11 @@ vpn killswitch        # xem: on/off (mặc định off)
 vpn killswitch on     # chặn toàn bộ traffic ra ngoài khi VPN full-tunnel đang kết nối lại
 ```
 
-Khi tunnel rớt, daemon đổi hai route `0.0.0.0/1` và `128.0.0.0/1` (và IPv6) thành route blackhole *trước khi* đóng utun, nên không có khoảnh khắc nào traffic lọt ra ngoài; các lần thử kết nối lại vẫn ra được server nhờ host route riêng. Mạng LAN vẫn dùng được. Truy vấn DNS tới resolver trong LAN vẫn có thể ra ngoài. Chỉ áp dụng cho profile `full_tunnel`, và chỉ sau khi đã từng kết nối được (lần connect đầu thất bại thì mạng được trả lại như thường). Gỡ bằng `vpn disconnect` (hoặc `vpn repair` nếu tiến trình đã chết; menu bar app tự chạy repair khi phát hiện tiến trình đã chết). Áp dụng ở lần `connect` tiếp theo.
+Chỉ áp dụng cho profile `full_tunnel`. Khi tunnel rớt và đang tự kết nối lại, internet bị chặn thay vì để traffic đi thẳng không qua VPN; mạng LAN vẫn dùng được. Nếu bị kẹt: `vpn disconnect` (hoặc `vpn repair` nếu tiến trình đã chết). Áp dụng ở lần `connect` tiếp theo. Menu bar app có công tắc tương ứng trong Settings.
 
 ### Giữ kết nối
 
-`connect` chạy nền và tự giữ tunnel: gửi LCP echo + NAT-T keepalive mỗi 20 giây, coi server là mất nếu 60 giây không có gói hợp lệ nào, và khi đó tự dọn tunnel rồi kết nối lại (backoff 2–20 giây) cho tới khi bạn `disconnect`. Trong lúc kết nối lại, trạng thái là `CONNECTING` (`vpn status` hiện `Reconnecting`) và mặc định lưu lượng đi thẳng, không qua VPN (bật kill switch bên dưới để chặn thay vì để lộ). Nếu rekey ESP liên tục thất bại (server đã hết hạn IKE SA, hoặc SA sắp hết hạn), daemon kết nối lại chủ động thay vì đợi tunnel chết.
-
-**Đá session cũ trước khi đăng nhập.** Khi client chết đột ngột (mất mạng, `kill -9`, crash, khởi động lại máy) session PPP vẫn sống trên server thêm khoảng 75 giây, và lúc đó đăng nhập lại bị từ chối "already logged in". Vì vậy client ghi cặp tunnel ID và session ID phía server (nhận trong SCCRP/ICRP) vào `~/.config/vpn/session.json` (quyền 0600, không nằm ở `/var/run` vì thư mục đó bị xoá khi boot) lúc kết nối xong và làm mới mốc "còn sống" mỗi 5 phút. Lần connect kế tiếp, ngay sau khi IPsec SA lên và trước khi đăng nhập, client gửi LCP Terminate-Request tới đúng session cũ để server nhả tài khoản. File bị xoá khi disconnect sạch, và bị bỏ qua nếu khác server hoặc lần cuối thấy còn sống đã quá 30 phút.
-
-**Session cũ trên server không lọt vào tunnel mới.** Server chuyển lưu lượng downstream của một session L2TP còn sót (cùng địa chỉ IP) sang IPsec SA mới nhất, nên sau mỗi lần kết nối lại có thể có gói của tunnel/session khác (IP, LCP echo, kể cả Terminate-Request) chảy vào SA của phiên mới. Client chỉ nhận data message có đúng tunnel ID và session ID của mình; phần còn lại bị bỏ và đếm trong log (`ignored data for another L2TP session`). Nếu không lọc, gói của session cũ có thể bị bơm vào utun hoặc làm PPP kẹt ở bước CHAP Challenge.
-
-**Không gián đoạn ở mốc hết hạn SA.** Ba cơ chế giữ tunnel liền mạch khi khoá đến hạn:
-- *Client rekey ESP* ở nửa vòng đời SA (Quick Mode trên IKE SA hiện có).
-- *Server rekey ESP trước* (server tự khởi tạo Quick Mode): client trả lời như responder, cài SA mới và gửi bằng SA mới, SA cũ vẫn nhận cho tới khi server xoá. Không hỗ trợ PFS (server đòi Diffie-Hellman trong Quick Mode thì bị từ chối và ghi log).
-- *Re-auth IKE SA make-before-break*: khi IKE SA đi được 3/4 vòng đời (server hiện tại: 8 giờ, tức ở giờ thứ 6), daemon dựng IKE SA thứ hai và Quick Mode mới cạnh SA cũ (cổng local riêng, vì 4500 đang bận), chuyển gửi sang SA mới, giữ SA cũ 30 giây để nhận nốt gói còn bay rồi đóng. L2TP/PPP nằm trên ESP nên không bị đứt, không đăng nhập lại. Nếu re-auth thất bại mãi tới khi IKE SA quá hạn thì kết nối lại chủ động. Lỗi I/O ngắn (đổi Wi-Fi, gói lỗi) chỉ làm mất gói đang bay, không làm rớt tunnel. Ngoài timer, daemon lắng nghe sự kiện mạng của kernel (routing socket, không polling): mất route tới server thì thêm lại ngay; đổi Wi-Fi/cắm rút cáp/thức dậy sau sleep thì kiểm tra địa chỉ IP và gửi một probe, không có phản hồi trong 5 giây thì kết nối lại ngay thay vì đợi 60 giây.
-
-**Tiết kiệm tài nguyên:** daemon chạy 2 luồng OS, heap nhỏ (đọc utun dùng buffer tái sử dụng, không cấp phát mỗi gói); reader IKE chặn đọc thay vì thức dậy mỗi giây; không ghi log từng gói dữ liệu; log giới hạn 8/16 MB; menu bar app đọc file chỉ khi file đổi và giãn nhịp kiểm tra (1 giây khi đang mở/đang kết nối, 4–8 giây khi rảnh). `vpn connect` cho profile/account đang chạy là no-op; dùng `--force` để ép kết nối lại. Lần connect đầu bị timeout lúc đàm phán (server không trả lời SCCRQ, hoặc không gửi CHAP Challenge) được daemon tự thử lại tối đa 2 lần (cách nhau 3 giây) trước khi báo lỗi; sai mật khẩu hoặc "already logged in" thì báo ngay.
+`connect` chạy nền, tự phát hiện tunnel rớt (mất mạng, đổi Wi-Fi, server ngắt...) và tự kết nối lại, không cần thao tác gì. Trong lúc đang kết nối lại, `vpn status` hiện `Reconnecting`. `vpn connect` khi profile/account đó đã kết nối là no-op; dùng `--force` để ép kết nối lại ngay.
 
 ## Sự cố
 
