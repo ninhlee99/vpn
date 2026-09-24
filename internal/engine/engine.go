@@ -92,6 +92,7 @@ func Connect(cfg Config) error {
 	var dev *tun.Device
 	var pppT *pppOverL2TP
 	var ipcp ppp.NegotiatedIPCP
+	var lcpMagic uint32                      // ours, for answering the LNS's LCP Echo-Requests
 	var startRekey func(ctx context.Context) // set once Quick Mode succeeds
 	var ikeSess *ike.Session                 // set once Phase 1 succeeds
 
@@ -256,6 +257,7 @@ func Connect(cfg Config) error {
 			return fail(pppFailStage(err), "PPP negotiation", err)
 		}
 		ipcp = pppResult.IPCP
+		lcpMagic = pppResult.Magic
 		vpnlog.Info("ENGINE", "PPP OPENED", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "peer_ip": ipcp.PeerIP.String()})
 
 		// Everything below is teardown-on-failure just like the stages
@@ -368,7 +370,7 @@ func Connect(cfg Config) error {
 	go rtSnapshot.Watch(sigCtx, privilege.Elevate, 10*time.Second)
 	startRekey(sigCtx)
 
-	pumpErr := runDataPlane(sigCtx, dev, pppT)
+	pumpErr := runDataPlane(sigCtx, dev, pppT, lcpMagic)
 
 	// Tear down on the way out no matter why the pump stopped (signal or
 	// error) — the disconnect/repair CLI paths exist for when this process
@@ -450,7 +452,7 @@ func dnsServerStrings(ipcp ppp.NegotiatedIPCP) []string {
 // runDataPlane bridges the utun device and the PPP/L2TP/ESP stack: every
 // IP packet read from one side is written to the other. It blocks until
 // ctx is cancelled or either direction hits a fatal error.
-func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error {
+func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMagic uint32) error {
 	errCh := make(chan error, 2)
 
 	// utun -> PPP -> L2TP -> ESP
@@ -501,28 +503,11 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP) error
 					return
 				}
 			case ppp.ProtoLCP:
-				// The LNS may keep sending LCP Echo-Requests as a keepalive
-				// during the data phase (negotiatePhase only handles these
-				// while a Configure-Request/-Ack exchange is in flight) —
-				// reply so it doesn't conclude the link died and tear the
-				// session down from its side. It can also retransmit its
-				// own Configure-Request here if our earlier Ack to it never
-				// arrived (see runAuth's identical handling, which fixed a
-				// live case of this stalling the peer's own LCP state
-				// machine before it would even send a CHAP Challenge) — ack
-				// it here too rather than assuming that can only happen
-				// during auth.
-				pkt, err := ppp.ParseControlPacket(payload)
-				if err == nil {
-					switch pkt.Code {
-					case ppp.CodeEchoRequest:
-						reply := ppp.ControlPacket{Code: ppp.CodeEchoReply, Identifier: pkt.Identifier, Data: pkt.Data}
-						_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
-					case ppp.CodeConfigureRequest:
-						reply := ppp.ControlPacket{Code: ppp.CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
-						_ = pppT.SendFrame(ppp.ProtoLCP, reply.Marshal())
-					}
-				}
+				// The LNS keeps sending LCP Echo-Requests as a keepalive for
+				// the whole session and ends it once enough go unanswered;
+				// it can also retransmit its Configure-Request if our Ack
+				// was lost. Same handling as during authentication.
+				ppp.HandleOpenedLCP(pppT, payload, lcpMagic)
 			}
 			// Other protocols (e.g. IPV6CP, which this client never
 			// negotiates) are silently ignored — the peer already knows we
