@@ -93,11 +93,22 @@ func Connect(cfg Config) error {
 	var pppT *pppOverL2TP
 	var ipcp ppp.NegotiatedIPCP
 	var startRekey func(ctx context.Context) // set once Quick Mode succeeds
+	var ikeSess *ike.Session                 // set once Phase 1 succeeds
 
 	// The IKE/ESP socket reader (ike.StartDataPhase) runs from Quick Mode
 	// until Connect returns, on every path.
 	ikeCtx, stopIKE := context.WithCancel(sigCtx)
 	defer stopIKE()
+
+	// Registered after stopIKE so it runs first, on every return path —
+	// including each failure between Phase 1 and a working tunnel — and
+	// tells the server to drop the IKE SA. Otherwise the server keeps the
+	// half-open SA (and the account's session) until its own timeouts.
+	defer func() {
+		if ikeSess != nil {
+			ikeSess.Close()
+		}
+	}()
 
 	setupErr := privilege.Elevate(func() error {
 		// vpnlog.Init has to run here, not before Elevate: /var/log/vpn.log
@@ -186,6 +197,7 @@ func Connect(cfg Config) error {
 			_ = rtSnapshot.Restore()
 			return fail("IKE_TIMEOUT", "IKEv1 Phase 1 negotiation", err)
 		}
+		ikeSess = sess
 		vpnlog.Info("ENGINE", "IKE Phase 1 established", vpnlog.Fields{"nat_detected": sess.NATDetected})
 
 		qm, err := sess.EstablishQuickMode(cfg.ESPProposals, localIP, serverIP)

@@ -119,12 +119,15 @@ func (s *Session) dispatchIKE(msg []byte) {
 	if err != nil {
 		return
 	}
-	if h.InitiatorSPI != s.InitiatorSPI {
-		// A different IKE SA from the server — typically a new Main Mode
-		// it initiates to re-authenticate. This client cannot act as a
-		// Main Mode responder; logged so a long-session test shows it.
-		vpnlog.Error(stage, "server sent a message for another IKE SA (re-authentication attempt?) — not supported", vpnlog.Fields{
+	swapped := h.InitiatorSPI == s.ResponderSPI && h.ResponderSPI == s.InitiatorSPI
+	if h.InitiatorSPI != s.InitiatorSPI && !swapped {
+		// Not this SA: an earlier attempt of ours the server still holds
+		// (it keeps probing it with DPD/Delete until its timeouts fire)
+		// or a Main Mode it started itself. Either way there is nothing
+		// to act on — the messages are under keys we no longer have.
+		vpnlog.Info(stage, "ignored IKE message for a different IKE SA (stale earlier session on the server?)", vpnlog.Fields{
 			"exchange": h.ExchangeType, "msg_id": h.MessageID,
+			"initiator_spi": fmt.Sprintf("%x", h.InitiatorSPI), "responder_spi": fmt.Sprintf("%x", h.ResponderSPI),
 		})
 		return
 	}
@@ -163,9 +166,15 @@ func (s *Session) handleInformational(h Header, encBody []byte) {
 	for _, p := range payloads[1:] {
 		switch p.Type {
 		case PayloadNotify:
-			if len(p.Body) >= 8 {
-				vpnlog.Info(stage, "server sent Notify", vpnlog.Fields{"notify_type": binary.BigEndian.Uint16(p.Body[6:8])})
+			if len(p.Body) < 8 {
+				continue
 			}
+			nt := binary.BigEndian.Uint16(p.Body[6:8])
+			if nt == notifyRUThere {
+				s.replyDPD(p.Body)
+				continue
+			}
+			vpnlog.Info(stage, "server sent Notify", vpnlog.Fields{"notify_type": nt})
 		case PayloadDelete:
 			proto, spis, err := parseDelete(p.Body)
 			if err != nil {
