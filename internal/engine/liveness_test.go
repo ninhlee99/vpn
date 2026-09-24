@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"vpn/internal/l2tp"
+	"vpn/internal/ppp"
 )
 
 func TestWatchdogKeepsProbingWhileTrafficArrives(t *testing.T) {
@@ -72,5 +75,40 @@ func TestTransientNegotiationFailure(t *testing.T) {
 		if got := transientNegotiationFailure(c.ce); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
+	}
+}
+
+type captureTransport struct{ sent [][]byte }
+
+func (c *captureTransport) Send(m []byte) error                  { c.sent = append(c.sent, m); return nil }
+func (c *captureTransport) Recv(context.Context) ([]byte, error) { return nil, errors.New("unused") }
+
+// After an abrupt network loss the old PPP session is still alive on the LNS.
+// Eviction must address it by the IDs the LNS assigned, carry an LCP
+// Terminate-Request, and be repeated (it is an unreliable data message).
+func TestEvictStaleTerminatesTheOldSession(t *testing.T) {
+	st, sg := staleTerminateGap, staleSettle
+	staleTerminateGap, staleSettle = time.Millisecond, time.Millisecond
+	defer func() { staleTerminateGap, staleSettle = st, sg }()
+
+	ct := &captureTransport{}
+	evictStale(ct, &staleSession{tunnel: 1694, session: 58187})
+	if len(ct.sent) != staleTerminateAttempts {
+		t.Fatalf("sent %d messages, want %d", len(ct.sent), staleTerminateAttempts)
+	}
+	msg, err := l2tp.Parse(ct.sent[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.IsControl || msg.Header.TunnelID != 1694 || msg.Header.SessionID != 58187 {
+		t.Fatalf("must be a data message for the LNS's own tunnel/session IDs, got %+v", msg.Header)
+	}
+	f, err := ppp.Parse(msg.Payload)
+	if err != nil || f.Protocol != ppp.ProtoLCP {
+		t.Fatalf("payload is not an LCP frame: %v %+v", err, f)
+	}
+	pkt, err := ppp.ParseControlPacket(f.Payload)
+	if err != nil || pkt.Code != ppp.CodeTerminateRequest {
+		t.Fatalf("want LCP Terminate-Request, got %+v (%v)", pkt, err)
 	}
 }

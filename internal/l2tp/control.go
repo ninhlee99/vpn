@@ -172,6 +172,21 @@ func (tun *Tunnel) Close() {
 	_ = tun.sendReliableNoReply(ctx, stop)
 }
 
+// PeerIDs are the tunnel and session IDs the LNS assigned to this connection —
+// what it expects in the header of every message we send it.
+func (tun *Tunnel) PeerIDs() (tunnelID, sessionID uint16) {
+	return tun.peerTunnelID, tun.peerSessionID
+}
+
+// SendDataTo sends one PPP frame in an L2TP data message addressed to an
+// arbitrary tunnel/session of the LNS — used to end a session of ours whose
+// Tunnel object no longer exists (see the engine's eviction of a stale
+// session). Data messages carry no sequence numbers, so no control-channel
+// state is needed to send one.
+func SendDataTo(t Transport, peerTunnelID, peerSessionID uint16, pppFrame []byte) error {
+	return t.Send(MarshalData(peerTunnelID, peerSessionID, pppFrame))
+}
+
 // SendData wraps one PPP frame in an L2TP data message (unsequenced, RFC
 // 2661 §5.7.2 — this client relies on ESP + PPP's own LCP/CHAP retries for
 // reliability rather than L2TP data sequencing, matching the reference

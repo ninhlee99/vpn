@@ -17,7 +17,7 @@ const (
 	// kernel's network events (netevents.go), not from a shorter timer.
 	keepaliveEvery = 20 * time.Second // LCP echo + NAT keepalive: keeps NAT mappings alive and provokes a reply
 	deadAfter      = 60 * time.Second // this long without one valid packet from the server = peer gone
-	statsEvery     = 4                // log a "tunnel alive" line every statsEvery keepalive ticks
+	statsEvery     = 3                // log a "tunnel alive" line every statsEvery keepalive ticks
 )
 
 // liveness records what the data plane last heard from the server, so the
