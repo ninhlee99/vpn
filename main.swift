@@ -991,6 +991,40 @@ struct MenuBarPopupView: View {
     @State private var showingAddModal = false
     @State private var showingSettings = false
     @State private var editingProfile: VPNProfileItem?
+    var listHeight: CGFloat? = nil
+
+    @ViewBuilder private var profileList: some View {
+        if vpn.profiles.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "network.badge.shield.half.filled")
+                    .font(.system(size: 32))
+                    .foregroundColor(Color.gray.opacity(0.5))
+                    .padding(.top, 10)
+                Text("No VPN configurations")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.gray)
+                Text("Click \"+ Add\" to set up your first VPN.")
+                    .font(.system(size: 11))
+                    .foregroundColor(Color.gray.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 20)
+            }
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity)
+        } else {
+            VStack(spacing: 8) {
+                ForEach(vpn.profiles) { profile in
+                    ProfileCardRow(
+                        profile: profile,
+                        vpn: vpn,
+                        onEdit: { editingProfile = profile },
+                        onDelete: { vpn.deleteProfile(name: profile.name) }
+                    )
+                }
+            }
+            .padding(.horizontal, 16)
+        }
+    }
 
     var body: some View {
         let state = vpn.linkState
@@ -1116,35 +1150,13 @@ struct MenuBarPopupView: View {
             .padding(.bottom, 8)
 
             // Profile List or Empty State
-            if vpn.profiles.isEmpty {
-                VStack(spacing: 8) {
-                    Image(systemName: "network.badge.shield.half.filled")
-                        .font(.system(size: 32))
-                        .foregroundColor(Color.gray.opacity(0.5))
-                        .padding(.top, 10)
-                    Text("No VPN configurations")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.gray)
-                    Text("Click \"+ Add\" to set up your first VPN.")
-                        .font(.system(size: 11))
-                        .foregroundColor(Color.gray.opacity(0.7))
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 20)
-                }
-                .padding(.vertical, 20)
-                .frame(maxWidth: .infinity)
+            // The window passes a fixed list height (room for about 5 profiles, scrolls
+            // beyond that); the menu bar popover keeps its original content-sized list.
+            if let listHeight {
+                ScrollView(showsIndicators: false) { profileList }
+                    .frame(height: listHeight)
             } else {
-                VStack(spacing: 8) {
-                    ForEach(vpn.profiles) { profile in
-                        ProfileCardRow(
-                            profile: profile,
-                            vpn: vpn,
-                            onEdit: { editingProfile = profile },
-                            onDelete: { vpn.deleteProfile(name: profile.name) }
-                        )
-                    }
-                }
-                .padding(.horizontal, 16)
+                profileList
             }
 
             // Error Notice / Alert Card. A stale ("already logged in") server
@@ -1278,7 +1290,7 @@ struct MenuBarPopupView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
         }
-        .frame(width: 370)
+        .frame(width: 400)
         .background(Color(red: 0.07, green: 0.09, blue: 0.12))
         .animation(.easeInOut(duration: 0.3), value: state)
         .animation(.easeInOut(duration: 0.25), value: vpn.activeAlert)
@@ -1619,10 +1631,11 @@ struct SecondaryButtonStyle: ButtonStyle {
 
 // MARK: - App Delegate & Menu Bar Setup
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem?
     var popover = NSPopover()
+    var mainWindow: NSWindow?
     var hostingView: NSHostingView<MacOSMenuBar>?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1643,10 +1656,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         self.hostingView = hosting
 
-        popover.contentSize = NSSize(width: 370, height: 440)
+        popover.contentSize = NSSize(width: 400, height: 440)
         popover.behavior = .transient
         popover.delegate = self
+        // The UI is drawn for a dark surface (white text, hand-picked dark fills).
+        // Pin the popover to Dark Aqua so system controls (dividers, text fields,
+        // sheets, the popover arrow) look the same on every Mac instead of
+        // following each machine's Light/Dark setting.
+        popover.appearance = NSAppearance(named: .darkAqua)
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
+
+        // Opened from Finder/Launchpad → show a regular window.
+        showMainWindow()
+    }
+
+    // Clicking the app icon again (Launchpad, Finder, Dock) while it is running
+    // in the menu bar brings the window back.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    // Closing the window must not quit: the app carries on in the menu bar.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func showMainWindow() {
+        if popover.isShown { popover.performClose(nil) }
+        if mainWindow == nil {
+            let controller = NSHostingController(rootView: MenuBarPopupView(listHeight: 380))
+            let window = NSWindow(contentViewController: controller)
+            window.title = "TMS VPN"
+            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.appearance = NSAppearance(named: .darkAqua)
+            window.isReleasedWhenClosed = false
+            window.delegate = self
+            // Size the window to its content first: center() uses the current frame,
+            // and SwiftUI resizes the hosted view afterwards, which left the window
+            // hanging from the top of the screen next to the status bar.
+            window.setContentSize(controller.view.fittingSize)
+            // NSWindow.center() deliberately sits above true center; place it exactly.
+            let placeCentered = { [weak window] in
+                guard let window, let area = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+                window.setFrameOrigin(NSPoint(x: area.midX - window.frame.width / 2,
+                                              y: area.midY - window.frame.height / 2))
+            }
+            placeCentered()
+            DispatchQueue.main.async(execute: placeCentered)
+            mainWindow = window
+        }
+        // A regular app gets a Dock icon and a menu bar while its window is open.
+        NSApp.setActivationPolicy(.regular)
+        mainWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        MainActor.assumeIsolated { VPNManager.shared.setPopoverVisible(true) }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        // Back to a menu-bar-only app: no Dock icon, status item stays.
+        NSApp.setActivationPolicy(.accessory)
+        MainActor.assumeIsolated { VPNManager.shared.setPopoverVisible(false) }
     }
 
     // A menu-bar-only (accessory) app never shows this in the UI — there's
@@ -1694,6 +1762,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         guard let button = statusItem?.button else { return }
         if popover.isShown {
             popover.performClose(sender)
+        } else if mainWindow?.isVisible == true {
+            mainWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
         } else {
             MainActor.assumeIsolated {
                 VPNManager.shared.syncFromDisk()
