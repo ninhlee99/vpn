@@ -89,7 +89,7 @@ final class VPNManager: ObservableObject {
     @Published var profiles: [VPNProfileItem] = []
     @Published var activeProfileName: String?
     /// Tunnel MTU shared by every profile (`vpn mtu`); 1280 or 1400.
-    @Published var mtu: Int = 1400
+    @Published var mtu: Int = 1280
     /// Detailed per-packet logging for every connection (`vpn verbose`); off unless the user turns it on.
     @Published var verbose: Bool = false
     /// The daemon lost the tunnel and is re-establishing it by itself.
@@ -339,7 +339,7 @@ final class VPNManager: ObservableObject {
                 activeProf = cfg.active_profile
             }
             update(\.activeProfileName, activeProf)
-            update(\.mtu, cfg.mtu ?? 1400)
+            update(\.mtu, cfg.mtu ?? 1280)
             update(\.verbose, cfg.verbose ?? false)
             update(\.killSwitch, cfg.kill_switch ?? false)
 

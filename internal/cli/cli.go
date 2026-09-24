@@ -184,7 +184,7 @@ func cmdProfileAdd(args []string) error {
 	fs := newFlagSet("profile add")
 	server := fs.String("server", "", "VPN server host or IP (required)")
 	serverID := fs.String("server-id", "", "expected IKE remote ID")
-	mtu := fs.Int("mtu", 0, "this profile's MTU (default: keep the current one, else 1400); the global `vpn mtu` setting wins")
+	mtu := fs.Int("mtu", 0, "this profile's MTU (default: keep the current one, else 1280); the global `vpn mtu` setting wins")
 	fullTunnel := fs.Bool("full-tunnel", true, "route all traffic through the VPN")
 	psk := fs.String("psk", "", "IPsec pre-shared key (prompted if omitted)")
 	if err := fs.Parse(flagsFirst(args, map[string]bool{"--server": true, "--server-id": true, "--mtu": true, "--psk": true})); err != nil {

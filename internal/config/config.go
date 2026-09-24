@@ -55,7 +55,7 @@ type Config struct {
 }
 
 // DefaultMTU is used when neither the global setting nor the profile names one.
-const DefaultMTU = 1400
+const DefaultMTU = 1280
 
 // AllowedMTUs are the values a user may pick: 1400 fits ordinary links,
 // 1280 survives PPPoE, hotspots and other paths that fragment or drop the

@@ -144,7 +144,7 @@ const (
 // very next attempt normally goes through. Credential rejections are never
 // retried.
 const (
-	maxNegotiationRetries = 2
+	maxNegotiationRetries = 5
 	negotiationRetryWait  = 3 * time.Second
 )
 
@@ -555,7 +555,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		pppT = &pppOverL2TP{tun: l2tpTun}
 		mru := uint16(cfg.MTU)
 		if mru == 0 {
-			mru = 1400
+			mru = 1280
 		}
 		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
 		if err != nil {
