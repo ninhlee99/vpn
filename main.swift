@@ -281,14 +281,32 @@ final class VPNManager: ObservableObject {
                 detail: detail.isEmpty ? "CHAP authentication rejected by peer" : detail
             )
             message = "Authentication Failed: wrong account name or password."
+        } else if stage.contains("IKE") && detail.contains("no response") {
+            // The server never answered at all — a network or server problem,
+            // not a wrong secret (that only shows up after the server replies).
+            alert = VPNAlertInfo(
+                kind: .ikeFailed,
+                title: "Server Not Responding",
+                message: "The VPN server did not answer. This network may be blocking VPN traffic (UDP 500/4500), or the server is down — try another network.",
+                detail: detail
+            )
+            message = "Server Not Responding: the VPN server did not answer."
+        } else if stage.contains("IKE") && detail.contains("IKE_PROPOSAL_MISMATCH") {
+            alert = VPNAlertInfo(
+                kind: .ikeFailed,
+                title: "Unsupported Server Settings",
+                message: "The server accepts none of the encryption settings this client offers. Send the logs (vpn logs) to your administrator.",
+                detail: detail
+            )
+            message = "Unsupported Server Settings: no common encryption proposal."
         } else if stage == "IKE_FAILED" || stage.contains("IKE") {
             alert = VPNAlertInfo(
                 kind: .ikeFailed,
                 title: "IKE Handshake Failed",
-                message: "IPsec IKE handshake failed: wrong server address or shared secret.",
+                message: "IPsec IKE handshake failed: check the shared secret.",
                 detail: detail
             )
-            message = "IKE Handshake Failed: wrong server address or shared secret."
+            message = "IKE Handshake Failed: check the shared secret."
         } else if stage == "ROUTE_FAILURE" {
             alert = VPNAlertInfo(
                 kind: .routeFailed,
