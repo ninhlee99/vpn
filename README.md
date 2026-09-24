@@ -218,7 +218,7 @@ Binary tự hạ quyền về user thường ngay khi khởi động, và chỉ 
 
 ### Yêu cầu
 
-- Go theo `go.mod` (hiện là 1.27): `brew install go`.
+- Go theo `go.mod` (hiện là 1.27): `brew install go`, rồi kiểm tra `go version`. Nếu vẫn ra bản cũ (ví dụ go1.19, và `go build` báo `invalid go version '1.27.1'`), máy đang có thêm bản Go cài từ gói `.pkg` ở `/usr/local/go`: chạy `hash -r` hoặc mở terminal mới, và nên gỡ bản cũ bằng `sudo rm -rf /usr/local/go /etc/paths.d/go`.
 - App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ. Không có toolchain phù hợp thì tải bản app CI build sẵn cho mỗi PR: tab **Checks** của PR → workflow `test` → artifact **TMS-VPN-app**.
 - Prototype (tuỳ chọn): [bun](https://bun.sh).
 
