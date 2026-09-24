@@ -25,10 +25,14 @@ type saPair struct {
 type saSet struct {
 	mu    sync.RWMutex
 	pairs []saPair // oldest first; the last one is current
+
+	// kick asks runRekey to rekey right now — sent when the server deletes
+	// the pair in use, so the tunnel does not wait half a lifetime to recover.
+	kick chan struct{}
 }
 
 func newSASet(qm *ike.QuickModeResult) (*saSet, error) {
-	s := &saSet{}
+	s := &saSet{kick: make(chan struct{}, 1)}
 	if err := s.install(qm, time.Now()); err != nil {
 		return nil, err
 	}
@@ -98,6 +102,12 @@ func (s *saSet) drop(spis []uint32) (droppedCurrent bool) {
 		kept = append(kept, p)
 	}
 	s.pairs = kept
+	if droppedCurrent {
+		select {
+		case s.kick <- struct{}{}:
+		default:
+		}
+	}
 	return droppedCurrent
 }
 
@@ -129,7 +139,7 @@ const (
 // runRekey keeps the tunnel's SA pair fresh for as long as ctx lives.
 // override > 0 replaces the lifetime-based schedule (for testing a rekey
 // without waiting half an hour).
-func runRekey(ctx context.Context, sas *saSet, sess *ike.Session, rekey func() (*ike.QuickModeResult, error), lifetime, override time.Duration) {
+func runRekey(ctx context.Context, sas *saSet, sess *ike.Session, rekey func() (*ike.QuickModeResult, error), lifetime, override time.Duration, giveUp func(error)) {
 	schedule := func(l time.Duration) time.Duration {
 		if override > 0 {
 			return override
@@ -137,11 +147,14 @@ func runRekey(ctx context.Context, sas *saSet, sess *ike.Session, rekey func() (
 		return rekeyDelay(l)
 	}
 	next := schedule(lifetime)
+	failures := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(next):
+		case <-sas.kick:
+			vpnlog.Info("ENGINE", "rekeying now: the server deleted the ESP SA in use", nil)
 		}
 		sas.expireOld(time.Now())
 		if sess.Lifetime > 0 && time.Since(sess.EstablishedAt) > sess.Lifetime {
@@ -154,19 +167,46 @@ func runRekey(ctx context.Context, sas *saSet, sess *ike.Session, rekey func() (
 			err = sas.install(qm, time.Now())
 		}
 		if err != nil {
+			failures++
 			remaining := time.Until(sas.current().expires)
+			ikeExpired := sess.Lifetime > 0 && time.Since(sess.EstablishedAt) > sess.Lifetime
 			vpnlog.Error("ENGINE", "ESP rekey failed — retrying", vpnlog.Fields{
 				"err": err, "current_sa_remaining_s": int(remaining / time.Second),
+				"failures": failures, "ike_expired": ikeExpired,
 			})
+			if giveUp != nil && rekeyHopeless(failures, remaining, ikeExpired) {
+				// Waiting longer only ends with the SA expiring under live
+				// traffic and a minute of silence before the watchdog notices;
+				// a fresh negotiation now costs a couple of seconds.
+				giveUp(fmt.Errorf("ESP rekey keeps failing (%d times, IKE SA expired: %v, current SA has %s left): %w", failures, ikeExpired, remaining.Round(time.Second), err))
+				return
+			}
 			next = rekeyRetryEvery
 			continue
 		}
+		failures = 0
 		vpnlog.Info("ENGINE", "ESP SA rekeyed", vpnlog.Fields{
 			"in_spi": fmt.Sprintf("%08x", qm.Inbound.SPI), "out_spi": fmt.Sprintf("%08x", qm.Outbound.SPI),
 			"lifetime_s": int(qm.Lifetime / time.Second),
 		})
 		next = schedule(qm.Lifetime)
 	}
+}
+
+// Rekey is hopeless — and a full reconnect is the better recovery — once the
+// server has refused it while the IKE SA is past its lifetime (it is being, or
+// has been, torn down), or after repeated failures with the SA close to
+// expiring.
+const (
+	rekeyGiveUpFailures  = 3
+	rekeyGiveUpRemaining = 5 * time.Minute
+)
+
+func rekeyHopeless(failures int, remaining time.Duration, ikeExpired bool) bool {
+	if ikeExpired {
+		return true
+	}
+	return failures >= rekeyGiveUpFailures && remaining < rekeyGiveUpRemaining
 }
 
 func rekeyDelay(lifetime time.Duration) time.Duration {

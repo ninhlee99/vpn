@@ -138,13 +138,37 @@ vpn mtu          # xem MTU hiện tại
 vpn mtu 1280     # đặt cho tất cả profile (chỉ nhận 1280 hoặc 1400)
 ```
 
-Áp dụng ở lần `connect` tiếp theo. Dùng 1280 khi mạng hay bị đứng lúc tải dữ liệu lớn (hotspot, PPPoE); 1400 là mặc định. Menu bar app có ô chọn MTU ở chân cửa sổ.
+Áp dụng ở lần `connect` tiếp theo. Dùng 1280 khi mạng hay bị đứng lúc tải dữ liệu lớn (hotspot, PPPoE); 1400 là mặc định. Menu bar app có ô chọn MTU ở hàng cài đặt phía trên chân cửa sổ.
+
+### Log chi tiết
+
+```bash
+vpn verbose        # xem: on/off (mặc định on)
+vpn verbose off    # chỉ ghi mốc kết nối + lỗi, bỏ log từng gói tin
+```
+
+Mốc kết nối (IKE/L2TP/PPP, rekey, "tunnel alive" mỗi phút, sự kiện mạng, lý do rớt) và lỗi luôn được ghi. Bật verbose thì có thêm chi tiết giao thức (bắt tay, retransmit, gói bị bỏ); không bao giờ ghi từng gói dữ liệu, để đỡ ghi SSD. Áp dụng ở lần `connect` tiếp theo; log giới hạn dung lượng (xoay vòng 8 MB, tối đa 16 MB mỗi phiên). Menu bar app có công tắc "Verbose log" cạnh ô MTU.
+
+### Kill switch (tùy chọn)
+
+```bash
+vpn killswitch        # xem: on/off (mặc định off)
+vpn killswitch on     # chặn toàn bộ traffic ra ngoài khi VPN full-tunnel đang kết nối lại
+```
+
+Khi tunnel rớt, daemon đổi hai route `0.0.0.0/1` và `128.0.0.0/1` (và IPv6) thành route blackhole *trước khi* đóng utun, nên không có khoảnh khắc nào traffic lọt ra ngoài; các lần thử kết nối lại vẫn ra được server nhờ host route riêng. Mạng LAN vẫn dùng được. Truy vấn DNS tới resolver trong LAN vẫn có thể ra ngoài. Chỉ áp dụng cho profile `full_tunnel`, và chỉ sau khi đã từng kết nối được (lần connect đầu thất bại thì mạng được trả lại như thường). Gỡ bằng `vpn disconnect` (hoặc `vpn repair` nếu tiến trình đã chết; menu bar app tự chạy repair khi phát hiện tiến trình đã chết). Áp dụng ở lần `connect` tiếp theo.
+
+### Giữ kết nối
+
+`connect` chạy nền và tự giữ tunnel: gửi LCP echo + NAT-T keepalive mỗi 20 giây, coi server là mất nếu 60 giây không có gói hợp lệ nào, và khi đó tự dọn tunnel rồi kết nối lại (backoff 2–20 giây) cho tới khi bạn `disconnect`. Trong lúc kết nối lại, trạng thái là `CONNECTING` (`vpn status` hiện `Reconnecting`) và mặc định lưu lượng đi thẳng, không qua VPN (bật kill switch bên dưới để chặn thay vì để lộ). Nếu rekey ESP liên tục thất bại (server đã hết hạn IKE SA, hoặc SA sắp hết hạn), daemon kết nối lại chủ động thay vì đợi tunnel chết. Lỗi I/O ngắn (đổi Wi-Fi, gói lỗi) chỉ làm mất gói đang bay, không làm rớt tunnel. Ngoài timer, daemon lắng nghe sự kiện mạng của kernel (routing socket, không polling): mất route tới server thì thêm lại ngay; đổi Wi-Fi/cắm rút cáp/thức dậy sau sleep thì kiểm tra địa chỉ IP và gửi một probe, không có phản hồi trong 5 giây thì kết nối lại ngay thay vì đợi 60 giây.
+
+**Tiết kiệm tài nguyên:** daemon chạy 2 luồng OS, heap nhỏ (đọc utun dùng buffer tái sử dụng, không cấp phát mỗi gói); reader IKE chặn đọc thay vì thức dậy mỗi giây; không ghi log từng gói dữ liệu; log giới hạn 8/16 MB; menu bar app đọc file chỉ khi file đổi và giãn nhịp kiểm tra (1 giây khi đang mở/đang kết nối, 4–8 giây khi rảnh). `vpn connect` cho profile/account đang chạy là no-op; dùng `--force` để ép kết nối lại.
 
 ## Sự cố
 
 ```bash
 vpn diagnose      # kiểm tra mạng, DNS, UDP 500/4500, MTU trước khi connect; không thay đổi gì trên máy
-vpn logs -f       # xem log; thêm chi tiết bằng: vpn connect --verbose
+vpn logs -f       # xem log (/var/log/vpn.log)
 vpn repair        # dọn route/DNS nếu vpn bị crash hoặc bị kill giữa chừng
 ```
 

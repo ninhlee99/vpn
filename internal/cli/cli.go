@@ -41,6 +41,10 @@ func Run(args []string) int {
 		err = cmdAccount(rest)
 	case "mtu":
 		err = cmdMTU(rest)
+	case "verbose":
+		err = cmdVerbose(rest)
+	case "killswitch":
+		err = cmdKillSwitch(rest)
 	case "diagnose":
 		err = cmdDiagnose(rest)
 	case "connect":
@@ -82,8 +86,10 @@ Usage:
   vpn profile remove <name>
   vpn account add <profile> <account> [--default] [--password pw]
   vpn mtu [1280|1400]               show / set the tunnel MTU for all profiles (applies on the next connect)
+  vpn verbose [on|off]              show / set detailed per-packet logging for every connection (default on; applies on the next connect)
+  vpn killswitch [on|off]           block all non-local traffic while a full-tunnel VPN reconnects (default off; applies on the next connect)
   vpn diagnose [--profile name] [--server host] [--json]
-  vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose] [--rekey-after 2m]  (always runs in the background)
+  vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose] [--force] [--rekey-after 2m]  (always runs in the background)
   vpn disconnect
   vpn status [--json]
   vpn repair
@@ -219,6 +225,75 @@ func cmdMTU(args []string) error {
 		return nil
 	}
 	return fmt.Errorf("usage: vpn mtu [1280|1400]")
+}
+
+// cmdVerbose shows or sets whether connections write per-packet debug logs.
+func cmdVerbose(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	usage := fmt.Errorf("usage: vpn verbose [on|off]")
+	switch len(args) {
+	case 0:
+		if cfg.EffectiveVerbose() {
+			fmt.Println("on")
+		} else {
+			fmt.Println("off")
+		}
+		return nil
+	case 1:
+		switch args[0] {
+		case "on", "true", "1":
+			cfg.SetVerbose(true)
+		case "off", "false", "0":
+			cfg.SetVerbose(false)
+		default:
+			return usage
+		}
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("Detailed logging %s (applies on the next connect).\n", args[0])
+		return nil
+	}
+	return usage
+}
+
+// cmdKillSwitch shows or sets whether traffic is blocked while reconnecting.
+func cmdKillSwitch(args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	usage := fmt.Errorf("usage: vpn killswitch [on|off]")
+	switch len(args) {
+	case 0:
+		if cfg.KillSwitch {
+			fmt.Println("on")
+		} else {
+			fmt.Println("off")
+		}
+		return nil
+	case 1:
+		switch args[0] {
+		case "on", "true", "1":
+			cfg.KillSwitch = true
+		case "off", "false", "0":
+			cfg.KillSwitch = false
+		default:
+			return usage
+		}
+		if err := cfg.Save(); err != nil {
+			return err
+		}
+		fmt.Printf("Kill switch %s (applies on the next connect; only for full-tunnel profiles).\n", args[0])
+		if cfg.KillSwitch {
+			fmt.Println("While the VPN reconnects, internet traffic is blocked. If it ever gets stuck: `vpn disconnect` or `vpn repair`.")
+		}
+		return nil
+	}
+	return usage
 }
 
 // cmdProfileList prints every profile — the CLI otherwise had no way to see

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"syscall"
 
 	"vpn/internal/ike"
@@ -23,6 +24,23 @@ type espTransport struct {
 	sess        *ike.Session
 	sas         *saSet // current pair for sending; every live pair for receiving (see rekey.go)
 	repairRoute func() error
+	live        *liveness // nil in tests; otherwise fed by every valid inbound packet
+	drops       atomic.Uint64
+}
+
+// noteDrop counts a discarded inbound packet and logs the first and then every
+// 500th, so a burst (an old SA still being sent to, a corrupting path) leaves
+// evidence without one log line per packet.
+func (t *espTransport) noteDrop(msg string, err error) {
+	n := t.drops.Add(1)
+	if n != 1 && n%500 != 0 {
+		return
+	}
+	f := vpnlog.Fields{"dropped_total": n}
+	if err != nil {
+		f["err"] = err
+	}
+	vpnlog.Info("ENGINE", msg, f)
 }
 
 const (
@@ -43,6 +61,9 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	pkt, err := t.sas.current().out.Encrypt(payload, protoUDP)
 	if err != nil {
 		return fmt.Errorf("ESP encrypt: %w", err)
+	}
+	if t.live != nil {
+		t.live.tx.Add(1)
 	}
 	return sendWithRouteRetry(func() error { return t.sess.SendESP(pkt) }, t.repairRoute)
 }
@@ -67,30 +88,46 @@ func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(pkt) < 4 {
-			continue
+		if msg, ok := t.process(pkt); ok {
+			return msg, nil
 		}
-		in := t.sas.inbound(binary.BigEndian.Uint32(pkt[0:4]))
-		if in == nil {
-			continue // an SA already deleted/expired, or not ours
-		}
-		payload, nextHeader, err := in.Decrypt(pkt)
-		if err != nil {
-			// A stray/replayed/corrupt ESP packet is not fatal to the
-			// session — log and keep waiting rather than aborting the
-			// whole tunnel over one bad datagram.
-			continue
-		}
-		// Never log the decrypted bytes themselves: this path carries the
-		// MS-CHAPv2 exchange and every tunnelled user packet in cleartext.
-		vpnlog.Debug("ENGINE", "ESP decrypted", vpnlog.Fields{
-			"next_header": nextHeader, "payload_len": len(payload),
-		})
-		if nextHeader != protoUDP || len(payload) < 8 {
-			continue
-		}
-		return payload[8:], nil // strip the inner UDP header, keep the L2TP message
 	}
+}
+
+// process decrypts one inbound ESP datagram and returns the L2TP message it
+// carries, or ok=false for anything not to be delivered (keepalives, unknown
+// or expired SPIs, corrupt packets). A packet that authenticates counts as
+// proof the server is alive — the watchdog relies on exactly this.
+func (t *espTransport) process(pkt []byte) (msg []byte, ok bool) {
+	if len(pkt) < 4 {
+		return nil, false // e.g. the server's 1-byte NAT keepalive
+	}
+	in := t.sas.inbound(binary.BigEndian.Uint32(pkt[0:4]))
+	if in == nil {
+		t.noteDrop("ESP packet for an unknown SPI dropped (an SA already deleted/expired, or not ours)", nil)
+		return nil, false
+	}
+	payload, nextHeader, err := in.Decrypt(pkt)
+	if err != nil {
+		// A stray/replayed/corrupt ESP packet is not fatal to the session —
+		// count it and keep waiting rather than aborting the whole tunnel
+		// over one bad datagram.
+		t.noteDrop("ESP packet failed to decrypt — dropped", err)
+		return nil, false
+	}
+	// Authenticated: the server is alive, whatever this packet turns out to be.
+	if t.live != nil {
+		t.live.touch()
+	}
+	// Deliberately no per-packet log line: one write to the log (an SSD write,
+	// a map allocation, a syscall) per tunnelled packet cost more than the
+	// packet itself. Traffic is summarised by the periodic "tunnel alive"
+	// counters instead — and decrypted bytes are never logged, since this
+	// path carries the MS-CHAPv2 exchange and every user packet in cleartext.
+	if nextHeader != protoUDP || len(payload) < 8 {
+		return nil, false
+	}
+	return payload[8:], true // strip the inner UDP header, keep the L2TP message
 }
 
 // pppOverL2TP implements ppp.Transport over an established l2tp.Tunnel's
@@ -104,14 +141,20 @@ func (p *pppOverL2TP) SendFrame(protocol uint16, payload []byte) error {
 	return p.tun.SendData(frame.Marshal())
 }
 
+// RecvFrame returns the next well-formed PPP frame. A malformed one is
+// skipped, not returned as an error: callers treat an error here as the
+// transport being gone, and one corrupt datagram must not end the session.
 func (p *pppOverL2TP) RecvFrame(ctx context.Context) (uint16, []byte, error) {
-	raw, err := p.tun.RecvData(ctx)
-	if err != nil {
-		return 0, nil, err
+	for {
+		raw, err := p.tun.RecvData(ctx)
+		if err != nil {
+			return 0, nil, err
+		}
+		f, err := ppp.Parse(raw)
+		if err != nil {
+			vpnlog.Debug("ENGINE", "skipped malformed PPP frame", vpnlog.Fields{"err": err, "len": len(raw)})
+			continue
+		}
+		return f.Protocol, f.Payload, nil
 	}
-	f, err := ppp.Parse(raw)
-	if err != nil {
-		return 0, nil, err
-	}
-	return f.Protocol, f.Payload, nil
 }

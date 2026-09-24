@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
+	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +32,7 @@ func cmdConnect(args []string) error {
 	accountName := fs.String("account", "", "account to use (default: profile's default account)")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall connect timeout")
 	verbose := fs.Bool("verbose", false, "verbose protocol logging")
+	force := fs.Bool("force", false, "reconnect even if this profile/account is already connected")
 	rekeyAfter := fs.Duration("rekey-after", 0, "rekey the ESP SAs this often instead of at half their lifetime (testing)")
 	// -d/--daemon are accepted but always on — connect always backgrounds
 	// itself now; the flags exist only so old scripts/muscle memory using
@@ -62,7 +66,18 @@ func cmdConnect(args []string) error {
 	// this closes; it's why this can't just be two separate steps like it
 	// used to be.
 	var cmd *exec.Cmd
+	alreadyUp := false
 	err = engine.WithConnectLock(func() error {
+		// Already serving this very profile/account (connected, or
+		// reconnecting by itself): leave it running. Replacing a healthy
+		// session would drop the user's traffic and the server-side login.
+		if !*force {
+			if st, ok := engine.AlreadyServing(t.profileName, t.accountName); ok {
+				alreadyUp = true
+				fmt.Printf("Already %s (pid %d) — nothing to do. Use `vpn connect --force` to reconnect anyway.\n", strings.ToLower(string(st.Phase)), st.PID)
+				return nil
+			}
+		}
 		if err := engine.PrepareNewConnect(); err != nil {
 			return fmt.Errorf("disconnect previous session: %w", err)
 		}
@@ -75,6 +90,9 @@ func cmdConnect(args []string) error {
 	})
 	if err != nil {
 		return err
+	}
+	if alreadyUp {
+		return nil
 	}
 
 	fmt.Printf("Connecting in the background (pid %d)...\n", cmd.Process.Pid)
@@ -142,7 +160,9 @@ type connectTarget struct {
 	profileName string
 	profile     *config.Profile
 	accountName string
-	mtu         int // config.EffectiveMTU: the global setting, else the profile's
+	mtu         int  // config.EffectiveMTU: the global setting, else the profile's
+	verbose     bool // config.EffectiveVerbose: the global logging setting
+	killSwitch  bool // config.KillSwitch: block traffic while reconnecting
 }
 
 // resolveTarget resolves the profile and account a connect would use —
@@ -160,7 +180,7 @@ func resolveTarget(profileName, accountName string) (*connectTarget, error) {
 	if err != nil {
 		return nil, fmt.Errorf("profile %q: %w — run `vpn account add %s <username> --default`", pName, err, pName)
 	}
-	return &connectTarget{profileName: pName, profile: p, accountName: aName, mtu: cfg.EffectiveMTU(p)}, nil
+	return &connectTarget{profileName: pName, profile: p, accountName: aName, mtu: cfg.EffectiveMTU(p), verbose: cfg.EffectiveVerbose(), killSwitch: cfg.KillSwitch}, nil
 }
 
 // checkSecretsStored confirms the PSK and password exist in Keychain
@@ -193,6 +213,7 @@ func (t *connectTarget) errNoPassword(cause error) error {
 }
 
 func doConnect(profileName, accountName string, timeout time.Duration, verbose bool, rekeyAfter time.Duration) error {
+	tuneDaemonRuntime()
 	t, err := resolveTarget(profileName, accountName)
 	if err != nil {
 		return err
@@ -219,8 +240,9 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 		MTU:          t.mtu,
 		FullTunnel:   p.FullTunnel,
 		Timeout:      timeout,
-		Verbose:      verbose,
+		Verbose:      verbose || t.verbose,
 		RekeyAfter:   rekeyAfter,
+		KillSwitch:   t.killSwitch,
 	})
 }
 
@@ -253,6 +275,11 @@ func cmdStatus(args []string) error {
 	}
 	if s.TunDevice != "" {
 		fmt.Printf("Tunnel:  %s (%s)\n", s.TunDevice, s.LocalIP)
+	}
+	if s.Reconnecting {
+		fmt.Printf("Reconnecting: yes (lost the tunnel %d time(s); it is being re-established automatically)\n", s.Reconnects)
+	} else if s.Reconnects > 0 {
+		fmt.Printf("Reconnects: %d\n", s.Reconnects)
 	}
 	if s.FailStage != "" {
 		fmt.Printf("Last failure: %s (%s)\n", s.FailStage, s.FailDetail)
@@ -302,4 +329,14 @@ func cmdLogs(args []string) error {
 		os.Stdout.Write(data)
 		return nil
 	})
+}
+
+// tuneDaemonRuntime shrinks the long-lived background process. It sits idle
+// almost all of its life, moving small packets: two OS threads are plenty
+// (fewer threads to wake and keep resident), and a GC that runs a little
+// earlier keeps the resident heap small instead of letting it drift up.
+func tuneDaemonRuntime() {
+	runtime.GOMAXPROCS(2)
+	debug.SetGCPercent(50)
+	debug.SetMemoryLimit(64 << 20) // soft: makes the GC work harder near it, never fails an allocation
 }

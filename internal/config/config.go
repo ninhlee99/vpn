@@ -37,7 +37,13 @@ type Config struct {
 	// MTU, when set, is the tunnel MTU for every profile and wins over the
 	// per-profile value: it is a property of the network the user is on, not
 	// of a server, so it is one switch rather than one per profile.
-	MTU           int                 `json:"mtu,omitempty"`
+	MTU int `json:"mtu,omitempty"`
+	// Verbose, when set, turns per-packet debug logging on or off for every
+	// connection. Nil means the default (on — see EffectiveVerbose).
+	Verbose *bool `json:"verbose,omitempty"`
+	// KillSwitch, when on, blocks all non-local traffic while a full-tunnel
+	// VPN reconnects instead of letting it flow around the tunnel unprotected.
+	KillSwitch    bool                `json:"kill_switch,omitempty"`
 	ActiveProfile string              `json:"active_profile,omitempty"`
 	Profiles      map[string]*Profile `json:"profiles"`
 
@@ -82,6 +88,16 @@ func (c *Config) EffectiveMTU(p *Profile) int {
 	}
 	return DefaultMTU
 }
+
+// EffectiveVerbose reports whether connections should write per-packet debug
+// logging. On unless the user turned it off: a drop that leaves no trace in
+// the log cannot be diagnosed afterwards, and the log file is size-bounded.
+func (c *Config) EffectiveVerbose() bool {
+	return c.Verbose == nil || *c.Verbose
+}
+
+// SetVerbose sets the global verbose-logging switch.
+func (c *Config) SetVerbose(on bool) { c.Verbose = &on }
 
 // DefaultIKEProposals mirrors the IKE proposals accepted by the reference
 // strongSwan config at ~/l2tp-proxy/entrypoint.sh: aes256-sha256-modp2048,

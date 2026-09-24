@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestAddProfileUpdateKeepsAccounts(t *testing.T) {
 	c := &Config{}
@@ -75,5 +78,37 @@ func TestReAddKeepsProfileMTU(t *testing.T) {
 	c.AddProfile("w", &Profile{Server: "s2"}) // e.g. the UI's edit form, which passes no --mtu
 	if got := c.Profiles["w"].MTU; got != 1280 {
 		t.Fatalf("re-add reset MTU to %d, want 1280 kept", got)
+	}
+}
+
+func TestVerboseDefaultsOnAndPersists(t *testing.T) {
+	c := &Config{Profiles: map[string]*Profile{}}
+	if !c.EffectiveVerbose() {
+		t.Fatal("detailed logging must be on unless the user turned it off")
+	}
+	c.SetVerbose(false)
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.EffectiveVerbose() {
+		t.Fatal("an explicit off did not survive a save/load round trip")
+	}
+}
+
+func TestKillSwitchDefaultsOffAndPersists(t *testing.T) {
+	var c Config
+	if c.KillSwitch {
+		t.Fatal("the kill switch blocks the network, so it must be opt-in")
+	}
+	c.KillSwitch = true
+	data, _ := json.Marshal(&c)
+	var back Config
+	if err := json.Unmarshal(data, &back); err != nil || !back.KillSwitch {
+		t.Fatalf("kill switch lost in a save/load round trip: %v %+v", err, back)
 	}
 }

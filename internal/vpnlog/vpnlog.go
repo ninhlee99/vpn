@@ -20,14 +20,22 @@ const Path = "/var/log/vpn.log"
 // RotatedPath keeps the previous log once Path outgrows maxSize. Rotation
 // happens when a connect starts (Init, the only moment this process is
 // root and may rename files in /var/log): a single session is not capped
-// mid-flight, but the log can no longer grow across sessions. Only
-// --verbose sessions write per-packet lines; normal ones log errors only.
+// mid-flight by rotation (see capWriter for the in-session bound), but the
+// log can no longer grow across sessions. Milestones (Info) and errors are
+// always written; verbose adds the per-packet Debug lines.
 const RotatedPath = Path + ".1"
 
-const maxSize = 5 << 20 // 5 MiB
+const maxSize = 8 << 20 // 8 MiB
+
+// sessionCap bounds one running session's log growth. The data plane runs
+// unprivileged and so cannot rename files in /var/log, but it can still
+// truncate the fd it already holds — so once the cap is hit the file is
+// emptied in place and a marker line records that.
+const sessionCap = 16 << 20 // 16 MiB
 
 var logger *log.Logger
 var verbose bool
+var logFile *os.File
 
 // redactedKeys never get their value written, even if a caller passes them
 // by mistake — defense in depth on top of callers simply not passing
@@ -48,12 +56,38 @@ func Init(v bool) error {
 	if err != nil {
 		return err
 	}
-	var w io.Writer = f
+	// Init runs once per (re)connect attempt of a long-lived daemon: release
+	// the previous attempt's fd instead of leaking one per attempt.
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+	logFile = f
+	var w io.Writer = &capWriter{f: f, limit: sessionCap}
 	if verbose {
-		w = io.MultiWriter(f, os.Stderr)
+		w = io.MultiWriter(w, os.Stderr)
 	}
 	logger = log.New(w, "", log.LstdFlags)
 	return nil
+}
+
+// capWriter empties the log file in place once this session has written
+// limit bytes, so a days-long verbose session cannot fill the disk.
+type capWriter struct {
+	f       *os.File
+	limit   int64
+	written int64
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if c.written+int64(len(p)) > c.limit {
+		if err := c.f.Truncate(0); err == nil {
+			c.written = 0
+			_, _ = c.f.WriteString(time.Now().Format("2006/01/02 15:04:05") + " [LOG] log file reached its size cap and was truncated\n")
+		}
+	}
+	n, err := c.f.Write(p)
+	c.written += int64(n)
+	return n, err
 }
 
 // rotate moves path to rotated once it exceeds limit. Best effort: a
@@ -93,15 +127,14 @@ func (f Fields) String() string {
 	return b.String()
 }
 
-// Info logs a status milestone (e.g. "IKE Phase 1 established"). Only
-// written when verbose is on — normal runs stay quiet in the log file
-// unless something actually goes wrong (see Error), so a long-lived
-// `connect` doesn't grow the log file forever for no reason.
+// Info logs a status milestone (e.g. "IKE Phase 1 established"). Always
+// written: milestones are low-volume, and without them a dropped session
+// leaves nothing to diagnose it from. Only per-packet detail (Debug) is
+// gated on verbose. Silent until Init, so non-connect commands print nothing.
 func Info(stage, msg string, f Fields) {
-	if !verbose {
-		return
+	if logger == nil {
+		return // no Init: a plain CLI command (diagnose, probe), not a connect — stay quiet as before
 	}
-	ensure()
 	logger.Printf("[%s] %s%s", stage, msg, f.String())
 }
 

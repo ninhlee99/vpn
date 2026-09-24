@@ -17,6 +17,8 @@ struct CLIProfile: Codable {
 
 struct CLIConfig: Codable {
     var mtu: Int?
+    var verbose: Bool?
+    var kill_switch: Bool?
     var active_profile: String?
     var profiles: [String: CLIProfile]?
 }
@@ -32,6 +34,7 @@ struct CLIState: Codable {
     var fail_stage: String?
     var fail_detail: String?
     var updated_at: String?
+    var reconnecting: Bool?
 }
 
 struct VPNProfileItem: Identifiable, Hashable {
@@ -71,6 +74,14 @@ final class VPNManager: ObservableObject {
     @Published var activeProfileName: String?
     /// Tunnel MTU shared by every profile (`vpn mtu`); 1280 or 1400.
     @Published var mtu: Int = 1400
+    /// Detailed per-packet logging for every connection (`vpn verbose`); on by default.
+    @Published var verbose: Bool = true
+    /// The daemon lost the tunnel and is re-establishing it by itself.
+    @Published var isReconnecting: Bool = false
+    /// Block traffic while a full-tunnel VPN reconnects (`vpn killswitch`); off by default.
+    @Published var killSwitch: Bool = false
+    /// One line explaining what is happening (and to the traffic) while reconnecting.
+    @Published var reconnectNote: String?
     @Published var isConnected: Bool = false
     @Published var isConnecting: Bool = false
     @Published var currentPhase: String = "DISCONNECTED"
@@ -120,13 +131,56 @@ final class VPNManager: ObservableObject {
         startPolling()
     }
 
+    /// Whether the popover is on screen. Only then (or while something is in flight) is a 1s
+    /// refresh worth its wakeups; a menu bar app that just sits there should barely register
+    /// in the battery report.
+    private var popoverVisible = false
+    private var repairedStaleDaemon = false
+
+    func setPopoverVisible(_ visible: Bool) {
+        popoverVisible = visible
+        syncFromDisk()
+        startPolling()
+    }
+
+    private func pollInterval() -> TimeInterval {
+        if popoverVisible || pendingIntent != nil || currentPhase == "CONNECTING" || activeAlert != nil { return 1 }
+        return currentPhase == "CONNECTED" ? 4 : 8
+    }
+
+    /// One-shot timer rescheduled after every tick so the interval can follow the state, with
+    /// tolerance so the system can coalesce the wakeup with others.
     func startPolling() {
         pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        let interval = pollInterval()
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor in
                 self?.syncFromDisk()
+                self?.startPolling()
             }
         }
+        timer.tolerance = interval * 0.3
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+    }
+
+    /// Re-decodes a JSON file only when it changed on disk (a stat is far cheaper than a read
+    /// plus decode, and nearly every poll finds both files untouched).
+    private struct FileCache<T> { var stamp: Date?; var size: Int?; var value: T? }
+    private var stateCache = FileCache<CLIState>(stamp: nil, size: nil, value: nil)
+    private var configCache = FileCache<CLIConfig>(stamp: nil, size: nil, value: nil)
+
+    private func loadJSON<T: Decodable>(_ url: URL, cache: inout FileCache<T>) -> T? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let stamp = attrs?[.modificationDate] as? Date
+        let size = attrs?[.size] as? Int
+        if let value = cache.value, stamp != nil, cache.stamp == stamp, cache.size == size { return value }
+        guard let data = try? Data(contentsOf: url), let value = try? JSONDecoder().decode(T.self, from: data) else {
+            cache = FileCache(stamp: nil, size: nil, value: nil)
+            return nil
+        }
+        cache = FileCache(stamp: stamp, size: size, value: value)
+        return value
     }
 
     /// @Published fires objectWillChange on every assignment, even of an equal value, so
@@ -137,13 +191,21 @@ final class VPNManager: ObservableObject {
         }
     }
 
-    private static func parseDate(_ s: String?) -> Date? {
-        guard let s = s else { return nil }
+    // Formatters are expensive to create and this runs on every poll.
+    private static let isoFractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = f.date(from: s) { return d }
+        return f
+    }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime]
-        return f.date(from: s)
+        return f
+    }()
+
+    private static func parseDate(_ s: String?) -> Date? {
+        guard let s = s else { return nil }
+        return isoFractional.date(from: s) ?? isoPlain.date(from: s)
     }
 
     func syncFromDisk() {
@@ -155,10 +217,22 @@ final class VPNManager: ObservableObject {
         var failStage = ""
         var failDetail = ""
         var updatedAt: Date?
+        var reconnecting = false
+        var daemonGone = false
 
-        if let stateData = try? Data(contentsOf: stateURL),
-           let st = try? JSONDecoder().decode(CLIState.self, from: stateData) {
+        if let st = loadJSON(stateURL, cache: &stateCache) {
             phase = st.phase ?? "DISCONNECTED"
+            reconnecting = st.reconnecting ?? false
+            // CONNECTED is written once and only rewritten by the daemon itself, so
+            // if that process is gone (crashed, killed) the file would otherwise stay
+            // green forever. Ignored while a connect/disconnect we just asked for is
+            // still settling.
+            if pendingIntent == nil, phase == "CONNECTED" || phase == "CONNECTING",
+               let pid = st.pid, pid > 0, kill(pid_t(pid), 0) != 0, errno != EPERM {
+                phase = "DISCONNECTED"
+                reconnecting = false
+                daemonGone = true
+            }
             activeProf = st.profile
             localIP = st.local_ip ?? ""
             tunDev = st.tun_device ?? ""
@@ -213,6 +287,25 @@ final class VPNManager: ObservableObject {
             // cancel any pending retry themselves when the user acts.
         }
 
+        if daemonGone {
+            update(\.errorMessage, "The VPN process stopped unexpectedly. Turn the VPN on again to restore protection.")
+            // A dead daemon can leave routes behind — with the kill switch, blocked ones. Clean up
+            // once, in the background; `repair` refuses to touch a live connection.
+            if !repairedStaleDaemon {
+                repairedStaleDaemon = true
+                let cli = self.cli
+                operationQueue.async { Self.run(cli, ["repair"]) }
+            }
+        } else {
+            repairedStaleDaemon = false
+        }
+        let fullTunnelActive = profiles.first(where: { $0.name == activeProf })?.isFullTunnel ?? true
+        update(\.reconnectNote, (reconnecting && phase == "CONNECTING")
+            ? (killSwitch && fullTunnelActive
+                ? "Connection lost — reconnecting. Internet is blocked (kill switch) until it is back."
+                : "Connection lost — reconnecting. Traffic is NOT protected until it is back.")
+            : nil)
+        update(\.isReconnecting, reconnecting && phase == "CONNECTING")
         let oldPhase = currentPhase
         update(\.currentPhase, phase)
         update(\.isConnected, phase == "CONNECTED")
@@ -225,13 +318,14 @@ final class VPNManager: ObservableObject {
         }
 
         // 2. Read Config (~/.config/vpn/config.json)
-        if let configData = try? Data(contentsOf: configURL),
-           let cfg = try? JSONDecoder().decode(CLIConfig.self, from: configData) {
+        if let cfg = loadJSON(configURL, cache: &configCache) {
             if activeProf == nil {
                 activeProf = cfg.active_profile
             }
             update(\.activeProfileName, activeProf)
             update(\.mtu, cfg.mtu ?? 1400)
+            update(\.verbose, cfg.verbose ?? true)
+            update(\.killSwitch, cfg.kill_switch ?? false)
 
             var items: [VPNProfileItem] = []
             for (pName, pVal) in cfg.profiles ?? [:] {
@@ -394,6 +488,7 @@ final class VPNManager: ObservableObject {
     private func beginIntent(phase: String, profile: String?, timeout: TimeInterval) -> Int {
         intentCounter += 1
         pendingIntent = PendingIntent(id: intentCounter, phase: phase, profile: profile, since: Date(), timeout: timeout)
+        startPolling() // something is in flight: refresh fast until the CLI catches up
 
         update(\.currentPhase, phase)
         update(\.isConnecting, phase == "CONNECTING")
@@ -540,6 +635,26 @@ final class VPNManager: ObservableObject {
         }
     }
 
+    /// Applies to every profile; takes effect on the next connect, not the running tunnel.
+    func setVerbose(_ on: Bool) {
+        update(\.verbose, on)
+        let cli = self.cli
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Self.run(cli, ["verbose", on ? "on" : "off"])
+            Task { @MainActor in self?.syncFromDisk() }
+        }
+    }
+
+    /// Applies to every full-tunnel profile; takes effect on the next connect.
+    func setKillSwitch(_ on: Bool) {
+        update(\.killSwitch, on)
+        let cli = self.cli
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            Self.run(cli, ["killswitch", on ? "on" : "off"])
+            Task { @MainActor in self?.syncFromDisk() }
+        }
+    }
+
     func deleteProfile(name: String) {
         let cli = self.cli
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -623,7 +738,7 @@ struct StatusDot: View {
     var body: some View {
         ZStack {
             if pulsing {
-                TimelineView(.animation) { timeline in
+                TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { timeline in
                     let p = CGFloat((timeline.date.timeIntervalSinceReferenceDate / 1.4).truncatingRemainder(dividingBy: 1))
                     Circle()
                         .fill(color.opacity(0.45 * Double(1 - p)))
@@ -903,7 +1018,7 @@ struct MenuBarPopupView: View {
                         glowing: state == .connected
                     )
                     ZStack(alignment: .leading) {
-                        Text(state == .connected ? "Connected" : (state == .connecting ? "Connecting..." : "Not Connected"))
+                        Text(state == .connected ? "Connected" : (state == .connecting ? (vpn.isReconnecting ? "Reconnecting..." : "Connecting...") : "Not Connected"))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(state == .connected ? VPNColors.green : (state == .connecting ? VPNColors.amber : Color.gray))
                             .id(state)
@@ -918,6 +1033,18 @@ struct MenuBarPopupView: View {
             .padding(.bottom, 12)
 
             Divider().background(Color.white.opacity(0.08))
+
+            if let note = vpn.reconnectNote {
+                Text(note)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(VPNColors.amberBright)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color(red: 0.22, green: 0.14, blue: 0.04))
+                    .transition(.opacity)
+            }
 
             // Active Connection Info Banner when connected
             if state == .connected {
@@ -1120,14 +1247,8 @@ struct MenuBarPopupView: View {
 
             Divider().background(Color.white.opacity(0.08)).padding(.top, 12)
 
-            // Footer Bar (Clean, NO Settings button)
-            HStack {
-                Text("TMS VPN Client")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.gray.opacity(0.7))
-
-                Spacer()
-
+            // Settings row: MTU and verbose logging, both global and applied on the next connect.
+            HStack(spacing: 8) {
                 Text("MTU")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.gray.opacity(0.7))
@@ -1139,7 +1260,42 @@ struct MenuBarPopupView: View {
                 .labelsHidden()
                 .frame(width: 100)
                 .help("MTU cho mọi profile. Áp dụng ở lần kết nối tiếp theo. Dùng 1280 nếu mạng hay bị đứng khi tải lớn.")
-                .padding(.trailing, 8)
+
+                Spacer()
+
+                Text("Verbose log")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.gray.opacity(0.7))
+                Toggle("", isOn: Binding(get: { vpn.verbose }, set: { vpn.setVerbose($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .help("Ghi log chi tiết từng gói tin vào /var/log/vpn.log (xem bằng `vpn logs`). Mặc định bật. Áp dụng ở lần kết nối tiếp theo.")
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 10)
+
+            HStack(spacing: 8) {
+                Text("Kill switch")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.gray.opacity(0.7))
+                Toggle("", isOn: Binding(get: { vpn.killSwitch }, set: { vpn.setKillSwitch($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .help("Khi mất kết nối VPN (full tunnel), chặn toàn bộ internet cho tới khi kết nối lại thay vì để traffic đi thẳng không được bảo vệ. Nếu bị kẹt: tắt VPN hoặc chạy `vpn repair`. Áp dụng ở lần kết nối tiếp theo.")
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+
+            // Footer Bar (Clean, NO Settings button)
+            HStack {
+                Text("TMS VPN Client")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.gray.opacity(0.7))
+
+                Spacer()
 
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     HStack(spacing: 5) {
@@ -1389,7 +1545,7 @@ struct SecondaryButtonStyle: ButtonStyle {
 
 // MARK: - App Delegate & Menu Bar Setup
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     static var shared: AppDelegate?
     var statusItem: NSStatusItem?
     var popover = NSPopover()
@@ -1415,6 +1571,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         popover.contentSize = NSSize(width: 370, height: 440)
         popover.behavior = .transient
+        popover.delegate = self
         popover.contentViewController = NSHostingController(rootView: MenuBarPopupView())
     }
 
@@ -1449,6 +1606,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
 
         NSApp.mainMenu = mainMenu
+    }
+
+    func popoverDidShow(_ notification: Notification) {
+        MainActor.assumeIsolated { VPNManager.shared.setPopoverVisible(true) }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        MainActor.assumeIsolated { VPNManager.shared.setPopoverVisible(false) }
     }
 
     @objc func togglePopover(_ sender: AnyObject?) {

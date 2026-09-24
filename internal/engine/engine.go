@@ -5,6 +5,7 @@ package engine
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -20,6 +22,7 @@ import (
 	"vpn/internal/ike"
 	"vpn/internal/ipsec"
 	"vpn/internal/l2tp"
+	"vpn/internal/netwatch"
 	"vpn/internal/ppp"
 	"vpn/internal/privilege"
 	"vpn/internal/routing"
@@ -48,6 +51,7 @@ type Config struct {
 	Timeout      time.Duration
 	Verbose      bool
 	RekeyAfter   time.Duration // >0: rekey this often instead of at half the SA lifetime
+	KillSwitch   bool          // full tunnel only: block traffic while reconnecting instead of letting it leak
 }
 
 // errAbortedByDisconnect is Connect's internal sentinel for "a `disconnect`
@@ -56,10 +60,142 @@ type Config struct {
 // FAILED state/alert to the UI.
 var errAbortedByDisconnect = errors.New("connect aborted: disconnected while negotiating")
 
-// Connect runs the full stage sequence and, on success, leaves the tunnel
-// interface up, routes/DNS applied, and state.Save()'d as CONNECTED. On any
-// failure, it restores whatever it had already changed before returning —
-// a failed connect must never leave the machine half-configured.
+// tunnelDropped is connectOnce's report that a tunnel that had come up was
+// lost afterwards (the data plane stopped). Everything it had changed is
+// already restored; Connect answers by reconnecting.
+type tunnelDropped struct {
+	cause  error
+	uptime time.Duration
+}
+
+func (e *tunnelDropped) Error() string {
+	return fmt.Sprintf("tunnel dropped after %s: %v", e.uptime.Round(time.Second), e.cause)
+}
+
+func (e *tunnelDropped) Unwrap() error { return e.cause }
+
+// connectError is a failed stage of one connect attempt.
+type connectError struct {
+	stage, detail string
+	err           error
+}
+
+func (e *connectError) Error() string { return fmt.Sprintf("%s: %s: %v", e.stage, e.detail, e.err) }
+func (e *connectError) Unwrap() error { return e.err }
+
+// Reconnect timing: after a drop or a failed reconnect attempt, wait
+// reconnectMin, doubling up to reconnectMax. A tunnel that then stayed up for
+// stableAfter counts as healthy again and resets the wait.
+const (
+	reconnectMin      = 2 * time.Second
+	reconnectMax      = 20 * time.Second
+	stableAfter       = time.Minute
+	maxAuthRejections = 3 // consecutive real credential rejections before giving up
+)
+
+// Connect brings the tunnel up and keeps it up. The first attempt behaves
+// as it always did: any failure is returned (and recorded as FAILED) so the
+// user sees it. Once a tunnel has been established, though, losing it is not
+// the end: the daemon tears down what is left and reconnects on its own,
+// with backoff, for as long as it runs — a VPN that quietly stays dead while
+// reporting "connected" (or that exits on the first hiccup) is worse than
+// one that briefly reconnects. It ends only on SIGTERM/SIGINT (`disconnect`)
+// or if the server keeps rejecting the credentials.
+func Connect(cfg Config) error {
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 30 * time.Second
+	}
+
+	// Registered before anything else — including before the PID that lets
+	// `disconnect` find this process at all — and reused for the entire
+	// call (every attempt, and the waits between them) instead of separate
+	// signal.NotifyContexts, so there is exactly one place that decides
+	// whether a termination was requested.
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
+	var (
+		reconnecting bool
+		reconnects   int
+		wait         = reconnectMin
+		authRejects  int
+		blocked      bool // a kill-switch hold may have left blackhole routes that only we can remove
+	)
+	releaseBlock := func() {
+		if blocked {
+			_ = privilege.Elevate(func() error { return routing.RestoreByServerIP(cfg.Server) })
+			blocked = false
+		}
+	}
+	defer releaseBlock() // every way out of Connect ends with the network back to normal
+	for {
+		err := connectOnce(sigCtx, cfg, reconnecting, reconnects)
+		if err == nil {
+			return nil // disconnected on request
+		}
+
+		var dropped *tunnelDropped
+		var ce *connectError
+		switch {
+		case errors.As(err, &dropped):
+			reconnecting = true
+			blocked = blocked || (cfg.KillSwitch && cfg.FullTunnel)
+			reconnects++
+			authRejects = 0
+			if dropped.uptime >= stableAfter {
+				wait = reconnectMin
+			}
+			vpnlog.Error("ENGINE", "tunnel lost — reconnecting", vpnlog.Fields{"err": dropped.cause, "uptime": dropped.uptime.Round(time.Second), "reconnects": reconnects, "retry_in": wait})
+		case reconnecting && errors.As(err, &ce):
+			if ce.stage == "PPP_AUTH_FAILURE" && !strings.Contains(ce.Error(), "already logged in") {
+				authRejects++
+				if authRejects >= maxAuthRejections {
+					// Really being refused, not merely racing our own stale
+					// session: stop instead of hammering the account.
+					releaseBlock()
+					return finalFailure(cfg, ce)
+				}
+			} else {
+				authRejects = 0
+			}
+			vpnlog.Error("ENGINE", "reconnect attempt failed — will retry", vpnlog.Fields{"err": err, "retry_in": wait})
+		default:
+			return err
+		}
+
+		select {
+		case <-sigCtx.Done():
+			releaseBlock() // before the state flips to DISCONNECTED: the user sees "off" only once traffic flows again
+			_ = privilege.Elevate(state.Clear)
+			vpnlog.Info("ENGINE", "disconnected while waiting to reconnect", nil)
+			return nil
+		case <-time.After(wait):
+		}
+		if wait *= 2; wait > reconnectMax {
+			wait = reconnectMax
+		}
+	}
+}
+
+// finalFailure records that reconnecting was given up on and returns the error.
+func finalFailure(cfg Config, ce *connectError) error {
+	failed := &state.State{
+		Phase: state.PhaseFailed, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server,
+		FailStage: ce.stage, FailDetail: fmt.Sprintf("%s: %v", ce.detail, ce.err),
+	}
+	_ = privilege.Elevate(failed.Save)
+	vpnlog.Error("ENGINE", "giving up reconnecting: the server keeps rejecting the login", vpnlog.Fields{"err": ce})
+	return ce
+}
+
+// connectOnce runs the full stage sequence once and, on success, leaves the
+// tunnel interface up, routes/DNS applied, and state.Save()'d as CONNECTED,
+// then pumps packets until the tunnel is lost (returning *tunnelDropped) or
+// a signal arrives (returning nil). On any failure, it restores whatever it
+// had already changed before returning — a failed connect must never leave
+// the machine half-configured. When reconnecting, failures are recorded as
+// CONNECTING (with the reason) instead of FAILED, so the UI keeps showing an
+// attempt in progress rather than raising an alert or racing its own retry.
 //
 // Privilege footprint: negotiation (IKE/L2TP/PPP — binding UDP/500, then
 // parsing whatever the far end sends) and setup (opening utun, route/DNS
@@ -71,20 +207,9 @@ var errAbortedByDisconnect = errors.New("connect aborted: disconnected while neg
 // neither of which requires root once open, so there's no reason for the
 // process to keep holding root through what's normally the vast majority
 // of a session's lifetime.
-func Connect(cfg Config) error {
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 30 * time.Second
-	}
-
-	// Registered before anything else — including before the PID that lets
-	// `disconnect` find this process at all — and reused for the entire
-	// call (setup negotiation *and* the data-plane phase below) instead of
-	// two separate signal.NotifyContexts, so there is exactly one place
-	// that decides whether a termination was requested.
-	sigCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
-	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server}
+func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int) error {
+	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server, Reconnecting: reconnecting, Reconnects: reconnects}
+	var connectedAt time.Time
 
 	var rtSnapshot *routing.Snapshot
 	var dnsSnap *dnsmgr.Snapshot
@@ -92,9 +217,29 @@ func Connect(cfg Config) error {
 	var dev *tun.Device
 	var pppT *pppOverL2TP
 	var ipcp ppp.NegotiatedIPCP
-	var lcpMagic uint32                      // ours, for answering the LNS's LCP Echo-Requests
-	var startRekey func(ctx context.Context) // set once Quick Mode succeeds
-	var ikeSess *ike.Session                 // set once Phase 1 succeeds
+	var lcpMagic uint32                                          // ours, for answering and sending LCP Echo-Requests (PPP result)
+	var startRekey func(ctx context.Context, giveUp func(error)) // set once Quick Mode succeeds
+	var ikeSess *ike.Session                                     // set once Phase 1 succeeds
+	var sas *saSet                                               // set once Quick Mode succeeds
+	var localIPOfSession net.IP                                  // our outbound address for this attempt
+	live := newLiveness()
+
+	// Kill switch: while reconnecting a full tunnel, routes are not restored
+	// after a failed attempt — the blackholes left by the previous drop stay,
+	// so nothing leaks between attempts. The first attempt never holds: a
+	// user whose very first connect fails gets their network back.
+	blocking := cfg.KillSwitch && cfg.FullTunnel
+	holdRoutes := blocking && reconnecting
+	restoreRoutes := func() {
+		if holdRoutes {
+			if err := rtSnapshot.Blackhole(); err != nil {
+				vpnlog.Error("ENGINE", "kill switch: could not keep traffic blocked", vpnlog.Fields{"err": err})
+			}
+			_ = rtSnapshot.RestoreKeepingBlackhole()
+			return
+		}
+		_ = rtSnapshot.Restore()
+	}
 
 	// The IKE/ESP socket reader (ike.StartDataPhase) runs from Quick Mode
 	// until Connect returns, on every path.
@@ -144,7 +289,13 @@ func Connect(cfg Config) error {
 				vpnlog.Info("ENGINE", "connect aborted by disconnect", vpnlog.Fields{"stage": stage})
 				return errAbortedByDisconnect
 			}
-			st.Phase = state.PhaseFailed
+			if reconnecting {
+				// Still an attempt in progress, not a failure the user has to
+				// act on: the reason rides along for `vpn status` and the log.
+				st.Phase = state.PhaseConnecting
+			} else {
+				st.Phase = state.PhaseFailed
+			}
 			st.FailStage = stage
 			// Include the real underlying error, not just the generic
 			// stage label passed in `detail` ("PPP negotiation", "IKEv1
@@ -159,7 +310,7 @@ func Connect(cfg Config) error {
 			st.FailDetail = fmt.Sprintf("%s: %v", detail, err)
 			_ = st.Save()
 			vpnlog.Error(stage, detail, vpnlog.Fields{"err": err})
-			return fmt.Errorf("%s: %s: %w", stage, detail, err)
+			return &connectError{stage: stage, detail: detail, err: err}
 		}
 
 		var err error
@@ -169,6 +320,9 @@ func Connect(cfg Config) error {
 		rtSnapshot, err = routing.Capture()
 		if err != nil {
 			return fail("ROUTE_FAILURE", "capture current routing state", err)
+		}
+		if holdRoutes {
+			rtSnapshot.ExpectBlackhole()
 		}
 
 		serverIP, err := resolveServer(cfg.Server)
@@ -180,6 +334,7 @@ func Connect(cfg Config) error {
 		}
 
 		localIP := localOutboundIP(rtSnapshot.DefaultInterface)
+		localIPOfSession = localIP
 		if localIP == nil {
 			return fail("ROUTE_FAILURE", "determine local outbound IP", fmt.Errorf("no IPv4 on %s", rtSnapshot.DefaultInterface))
 		}
@@ -195,7 +350,7 @@ func Connect(cfg Config) error {
 			LocalIP:    localIP,
 		})
 		if err != nil {
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail("IKE_TIMEOUT", "IKEv1 Phase 1 negotiation", err)
 		}
 		ikeSess = sess
@@ -203,14 +358,14 @@ func Connect(cfg Config) error {
 
 		qm, err := sess.EstablishQuickMode(cfg.ESPProposals, localIP, serverIP)
 		if err != nil {
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail("IPSEC_FAILURE", "Quick Mode (ESP SA) negotiation", err)
 		}
 		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": fmt.Sprintf("%08x", qm.Inbound.SPI), "out_spi": fmt.Sprintf("%08x", qm.Outbound.SPI)})
 
-		sas, err := newSASet(qm)
+		sas, err = newSASet(qm)
 		if err != nil {
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail("IPSEC_FAILURE", "set up ESP SAs", err)
 		}
 		// From here on one goroutine owns the socket and demultiplexes ESP
@@ -218,18 +373,22 @@ func Connect(cfg Config) error {
 		sess.StartDataPhase(ikeCtx, ike.Events{
 			DeleteESP: func(spis []uint32) {
 				if sas.drop(spis) {
-					vpnlog.Error("ENGINE", "server deleted the ESP SA currently in use — traffic stalls until the next rekey", nil)
+					vpnlog.Error("ENGINE", "server deleted the ESP SA currently in use — rekeying immediately", nil)
 				}
 			},
+			// Only logged by the reader itself: ESP normally keeps flowing
+			// until its own lifetime ends, and the watchdog reconnects the
+			// moment it stops. Reconnecting here would drop a working tunnel.
 		})
-		startRekey = func(ctx context.Context) {
+		startRekey = func(ctx context.Context, giveUp func(error)) {
 			go runRekey(ctx, sas, sess, func() (*ike.QuickModeResult, error) {
 				return sess.RekeyQuickMode(cfg.ESPProposals, localIP, serverIP)
-			}, qm.Lifetime, cfg.RekeyAfter)
+			}, qm.Lifetime, cfg.RekeyAfter, giveUp)
 		}
 		espT := &espTransport{
 			sess: sess,
 			sas:  sas,
+			live: live,
 			repairRoute: func() error {
 				return privilege.Elevate(func() error {
 					return rtSnapshot.ProtectServer(serverIP.String())
@@ -240,7 +399,7 @@ func Connect(cfg Config) error {
 		hostName, _ := localHostName()
 		l2tpTun, err = l2tp.Establish(ctx, espT, l2tp.Config{HostName: hostName, Timeout: cfg.Timeout})
 		if err != nil {
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail("L2TP_TIMEOUT", "L2TP tunnel/session establishment", err)
 		}
 		vpnlog.Info("ENGINE", "L2TP session established", nil)
@@ -253,7 +412,7 @@ func Connect(cfg Config) error {
 		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
 		if err != nil {
 			l2tpTun.Close()
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail(pppFailStage(err), "PPP negotiation", err)
 		}
 		ipcp = pppResult.IPCP
@@ -267,17 +426,20 @@ func Connect(cfg Config) error {
 		if err != nil {
 			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 			return fail("TUN_FAILURE", "open utun device", err)
 		}
 		teardownPartial := func() {
+			if holdRoutes { // swap to blackholes before the interface disappears: no leak window
+				_ = rtSnapshot.Blackhole()
+			}
 			dev.Close()
 			ppp.Terminate(pppT, 1)
 			l2tpTun.Close()
 			if dnsSnap != nil {
 				_ = dnsSnap.Restore()
 			}
-			_ = rtSnapshot.Restore()
+			restoreRoutes()
 		}
 
 		if ipcp.PeerIP == nil {
@@ -342,6 +504,8 @@ func Connect(cfg Config) error {
 		}
 
 		st.Phase = state.PhaseConnected
+		st.FailStage, st.FailDetail = "", "" // a reconnect attempt's last error is history once it worked
+		connectedAt = time.Now()
 		// st.PID was already recorded at the top of this closure.
 		st.TunDevice = dev.Name
 		st.LocalIP = ipcp.LocalIP.String()
@@ -361,45 +525,138 @@ func Connect(cfg Config) error {
 		}
 		return setupErr
 	}
-	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name})
+	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name, "mtu": cfg.MTU, "full_tunnel": cfg.FullTunnel, "reconnects": reconnects,
+		"ike_lifetime_s": int(ikeSess.Lifetime / time.Second), "esp_lifetime_s": int(sas.current().expires.Sub(connectedAt) / time.Second)})
+
+	// Everything that only makes sense while the tunnel is up stops together
+	// when it is lost, and *before* teardown: a route watcher or rekey still
+	// running while routes/SAs are being restored would undo the restore.
+	dpCtx, stopDP := context.WithCancel(ikeCtx)
+	dropCh := make(chan error, 2)
 
 	// macOS can silently reap the routes ProtectServer/ApplyFullTunnel just
 	// installed at any point during a long-lived session (see routing.go's
 	// Watch doc comment) — re-assert them periodically instead of trusting
 	// they stay in place for the whole connection.
-	go rtSnapshot.Watch(sigCtx, privilege.Elevate, 10*time.Second)
-	startRekey(sigCtx)
+	kickRoutes := make(chan struct{}, 1)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		rtSnapshot.Watch(dpCtx, privilege.Elevate, 0, kickRoutes)
+	}()
 
-	pumpErr := runDataPlane(sigCtx, dev, pppT, lcpMagic)
+	// Liveness watchdog: keeps the NAT mapping and the LNS's idle timers fed,
+	// and is the only thing that declares the peer dead (see liveness.go).
+	var echoMu sync.Mutex
+	var echoID uint8
+	probe := func() { // shared by the watchdog and the network-event handler
+		echoMu.Lock()
+		echoID++
+		id := echoID
+		echoMu.Unlock()
+		if err := ikeSess.SendNATKeepalive(); err != nil {
+			vpnlog.Error("ENGINE", "NAT keepalive send failed", vpnlog.Fields{"err": err})
+		}
+		// The request carries OUR negotiated Magic-Number (0 if the peer rejected
+		// it), as RFC 1661 §5.8 requires — pppd treats its own magic coming back
+		// as a loop.
+		magic := make([]byte, 4)
+		binary.BigEndian.PutUint32(magic, lcpMagic)
+		req := ppp.ControlPacket{Code: ppp.CodeEchoRequest, Identifier: id, Data: magic}
+		if err := pppT.SendFrame(ppp.ProtoLCP, req.Marshal()); err != nil {
+			vpnlog.Error("ENGINE", "LCP echo send failed", vpnlog.Fields{"err": err})
+		}
+	}
+	drop := func(err error) {
+		select {
+		case dropCh <- err:
+		default:
+		}
+	}
+	startRekey(dpCtx, drop)
+	go func() {
+		report := func(idle time.Duration) {
+			cur := sas.current()
+			vpnlog.Info("ENGINE", "tunnel alive", vpnlog.Fields{
+				"rx_packets": live.rx.Load(), "tx_packets": live.tx.Load(),
+				"idle_s":        int(idle / time.Second),
+				"esp_sa_left_s": int(time.Until(cur.expires) / time.Second),
+				"ike_age_s":     int(time.Since(ikeSess.EstablishedAt) / time.Second),
+				"uptime_s":      int(time.Since(connectedAt) / time.Second),
+			})
+		}
+		if err := watchdog(dpCtx, keepaliveEvery, deadAfter, live, probe, report); err != nil {
+			drop(err)
+		}
+	}()
+
+	// Kernel network events (route deleted, link/address changed) — reacts to
+	// a Wi-Fi roam or wake from sleep in seconds instead of waiting out the
+	// watchdog, and re-adds reaped routes right away instead of on a timer.
+	if events, err := netwatch.Subscribe(dpCtx); err != nil {
+		vpnlog.Error("ENGINE", "network event feed unavailable — relying on the liveness watchdog and slow route checks", vpnlog.Fields{"err": err})
+	} else {
+		go watchNetwork(dpCtx, events, localIPOfSession, live, probe, kickRoutes, drop, localAddrPresent)
+	}
+
+	pumpErr := runDataPlane(dpCtx, dev, pppT, lcpMagic, dropCh)
+	stopDP()
+	<-watchDone
+	uptime := time.Since(connectedAt)
 
 	// Tear down on the way out no matter why the pump stopped (signal or
 	// error) — the disconnect/repair CLI paths exist for when this process
 	// is no longer around to do it itself, not as the primary mechanism.
 	return privilege.Elevate(func() error {
+		lost := pumpErr != nil && sigCtx.Err() == nil
+		holdOnExit := lost && blocking
+		if holdOnExit {
+			// Swap the tunnel's routes for blackholes *before* the interface
+			// goes away, so there is no moment when traffic can leak.
+			if err := rtSnapshot.Blackhole(); err != nil {
+				vpnlog.Error("ENGINE", "kill switch: could not block traffic", vpnlog.Fields{"err": err})
+			}
+		}
 		dev.Close()
-		ppp.Terminate(pppT, 1)
+		if lost && live.idle() > 2*keepaliveEvery {
+			// The peer has stopped answering, so waiting for its Terminate-Ack
+			// only delays the reconnect (the same goes for the L2TP messages
+			// below, which never wait).
+			ppp.TerminateNoWait(pppT, 1)
+		} else {
+			ppp.Terminate(pppT, 1)
+		}
 		l2tpTun.Close()
 		if dnsSnap != nil {
 			_ = dnsSnap.Restore()
 		}
-		_ = rtSnapshot.Restore()
+		if holdOnExit {
+			_ = rtSnapshot.RestoreKeepingBlackhole()
+		} else {
+			_ = rtSnapshot.Restore()
+		}
 
-		if pumpErr != nil && sigCtx.Err() == nil {
+		if lost {
 			// Stopped for a reason other than the signal we were waiting
-			// for. The tunnel fails open (routes/DNS restored above), so
-			// record that loudly for `vpn status` instead of looking like
-			// an ordinary disconnect.
-			failed := &state.State{
-				Phase:      state.PhaseFailed,
-				Profile:    cfg.ProfileName,
-				Account:    cfg.AccountName,
-				Server:     cfg.Server,
-				FailStage:  "TUNNEL_FAILURE",
-				FailDetail: fmt.Sprintf("tunnel dropped (%v) — traffic now goes over the normal network WITHOUT VPN protection; run `vpn connect` again", pumpErr),
+			// for. Say honestly what happens to the traffic meanwhile.
+			exposure := "traffic goes over the normal network WITHOUT VPN protection until it is back"
+			if holdOnExit {
+				exposure = "all internet traffic is BLOCKED (kill switch) until it is back"
 			}
-			_ = failed.Save()
-			vpnlog.Error("ENGINE", "data plane stopped unexpectedly; traffic now bypasses the VPN", vpnlog.Fields{"err": pumpErr})
-			return fmt.Errorf("TUNNEL_FAILURE: data plane stopped: %w", pumpErr)
+			dropping := &state.State{
+				Phase:        state.PhaseConnecting,
+				Reconnecting: true,
+				Reconnects:   reconnects + 1,
+				PID:          os.Getpid(),
+				Profile:      cfg.ProfileName,
+				Account:      cfg.AccountName,
+				Server:       cfg.Server,
+				FailStage:    "TUNNEL_DROPPED",
+				FailDetail:   fmt.Sprintf("tunnel dropped (%v) — reconnecting; %s", pumpErr, exposure),
+			}
+			_ = dropping.Save()
+			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr, "exposure": exposure})
+			return &tunnelDropped{cause: pumpErr, uptime: uptime}
 		}
 		_ = state.Clear()
 		vpnlog.Info("ENGINE", "disconnected", nil)
@@ -449,64 +706,130 @@ func dnsServerStrings(ipcp ppp.NegotiatedIPCP) []string {
 	return out
 }
 
+// utunReadBuf is the largest packet read from utun in one call. The tunnel MTU
+// is 1280–1400, so 16 KiB is generous; 64 KiB just held memory for nothing.
+const utunReadBuf = 16 << 10
+
+// ioFailureLimit is how long a data-plane read/write may fail continuously,
+// with no success in between, before the tunnel is given up on. Shorter
+// blips (a Wi-Fi roam, a route macOS is re-adding, a momentarily full
+// buffer) just cost the packets in flight, which TCP and PPP recover.
+const ioFailureLimit = 30 * time.Second
+
 // runDataPlane bridges the utun device and the PPP/L2TP/ESP stack: every
-// IP packet read from one side is written to the other. It blocks until
-// ctx is cancelled or either direction hits a fatal error.
-func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMagic uint32) error {
+// IP packet read from one side is written to the other. It blocks until ctx
+// is cancelled, a fatal error stops either direction, or a message arrives
+// on dropCh (the liveness watchdog's verdict). Individual packet errors are
+// not fatal — see ioFailureLimit.
+func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMagic uint32, dropCh <-chan error) error {
 	errCh := make(chan error, 2)
+	fatal := func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	}
+	// Stop the receive side before returning: the caller's teardown reads the
+	// same PPP stream (LCP Terminate-Ack), and a pump goroutine still
+	// consuming it would steal the reply.
+	ctx, cancel := context.WithCancel(ctx)
+	var recvDone sync.WaitGroup
+	defer func() {
+		cancel()
+		recvDone.Wait()
+	}()
 
 	// utun -> PPP -> L2TP -> ESP
 	go func() {
-		buf := make([]byte, 65536)
+		buf := make([]byte, utunReadBuf)
+		reads := &failStreak{limit: ioFailureLimit}
+		sends := &failStreak{limit: ioFailureLimit}
 		for {
 			n, err := dev.Read(buf)
 			if err != nil {
-				select {
-				case errCh <- fmt.Errorf("read utun: %w", err):
-				default:
+				if errors.Is(err, syscall.EBADF) || ctx.Err() != nil {
+					fatal(fmt.Errorf("read utun: %w", err)) // closed under us: normal teardown
+					return
 				}
-				return
+				isFatal, logIt := reads.fail(time.Now())
+				if logIt {
+					vpnlog.Error("ENGINE", "read utun failed — retrying", vpnlog.Fields{"err": err})
+				}
+				if isFatal {
+					fatal(fmt.Errorf("read utun failing for %s: %w", ioFailureLimit, err))
+					return
+				}
+				time.Sleep(50 * time.Millisecond)
+				continue
 			}
+			reads.ok()
 			// Only IPv4 is negotiated (IPCP, never IPV6CP): framing any
 			// other packet as ppp.ProtoIP would hand the LNS garbage.
 			if n == 0 || buf[0]>>4 != 4 {
 				continue
 			}
 			if err := pppT.SendFrame(ppp.ProtoIP, buf[:n]); err != nil {
-				select {
-				case errCh <- fmt.Errorf("send PPP frame: %w", err):
-				default:
+				isFatal, logIt := sends.fail(time.Now())
+				if logIt {
+					vpnlog.Error("ENGINE", "send failed — dropping packets until it recovers", vpnlog.Fields{"err": err})
 				}
-				return
+				if isFatal {
+					fatal(fmt.Errorf("sending to the server failed for %s: %w", ioFailureLimit, err))
+					return
+				}
+				continue
+			}
+			if sends.n > 0 {
+				vpnlog.Info("ENGINE", "send recovered", vpnlog.Fields{"failed_packets": sends.n})
+				sends.ok()
 			}
 		}
 	}()
 
 	// ESP -> L2TP -> PPP -> utun
+	recvDone.Add(1)
 	go func() {
+		defer recvDone.Done()
+		writes := &failStreak{limit: ioFailureLimit}
 		for {
 			proto, payload, err := pppT.RecvFrame(ctx)
 			if err != nil {
-				select {
-				case errCh <- fmt.Errorf("recv PPP frame: %w", err):
-				default:
-				}
+				// Only a gone transport (or our own cancellation) gets here:
+				// bad frames are skipped inside RecvFrame.
+				fatal(fmt.Errorf("recv PPP frame: %w", err))
 				return
 			}
 			switch proto {
 			case ppp.ProtoIP:
 				if _, err := dev.Write(payload); err != nil {
-					select {
-					case errCh <- fmt.Errorf("write utun: %w", err):
-					default:
+					isFatal, logIt := writes.fail(time.Now())
+					if logIt {
+						vpnlog.Error("ENGINE", "write utun failed — dropping packets until it recovers", vpnlog.Fields{"err": err})
 					}
+					if isFatal || errors.Is(err, syscall.EBADF) {
+						fatal(fmt.Errorf("write utun: %w", err))
+						return
+					}
+					continue
+				}
+				writes.ok()
+			case ppp.ProtoLCP:
+				// The LNS keeps sending LCP Echo-Requests as a keepalive for the
+				// whole session and ends it once enough go unanswered (its reply
+				// must carry OUR magic number, see ppp.EchoReply); it can also
+				// retransmit its Configure-Request if our Ack was lost. Same
+				// handling as during authentication.
+				if pkt, err := ppp.ParseControlPacket(payload); err == nil && pkt.Code == ppp.CodeTerminateRequest {
+					// The server is ending the PPP session (kicked us, idle
+					// timeout, another login). Say so in the log and answer
+					// it, then let Connect reconnect: nothing more will
+					// arrive on this session.
+					vpnlog.Error("ENGINE", "server sent LCP Terminate-Request — it is closing this PPP session", nil)
+					ack := ppp.ControlPacket{Code: ppp.CodeTerminateAck, Identifier: pkt.Identifier}
+					_ = pppT.SendFrame(ppp.ProtoLCP, ack.Marshal())
+					fatal(fmt.Errorf("server terminated the PPP session (LCP Terminate-Request)"))
 					return
 				}
-			case ppp.ProtoLCP:
-				// The LNS keeps sending LCP Echo-Requests as a keepalive for
-				// the whole session and ends it once enough go unanswered;
-				// it can also retransmit its Configure-Request if our Ack
-				// was lost. Same handling as during authentication.
 				ppp.HandleOpenedLCP(pppT, payload, lcpMagic)
 			}
 			// Other protocols (e.g. IPV6CP, which this client never
@@ -518,6 +841,8 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMa
 	select {
 	case <-ctx.Done():
 		return nil
+	case err := <-dropCh:
+		return err
 	case err := <-errCh:
 		return err
 	}
@@ -591,6 +916,26 @@ func openLockFile() (*os.File, error) {
 // back to redoing the restore itself from what was last recorded on disk.
 func Disconnect() error {
 	return WithConnectLock(func() error { return killExisting(true) })
+}
+
+// AlreadyServing reports whether a live connect daemon is already handling
+// this profile/account: connected, or reconnecting on its own. A second
+// `vpn connect` for the same target must leave it alone — tearing down a
+// working session (and the server-side login with it) to negotiate an
+// identical one is what turned a stray connect into a dropped connection.
+// Callers must already hold WithConnectLock.
+func AlreadyServing(profile, account string) (*state.State, bool) {
+	st, err := state.Load()
+	if err != nil || st.PID <= 0 || !processAlive(st.PID) {
+		return nil, false
+	}
+	if st.Profile != profile || st.Account != account {
+		return nil, false
+	}
+	if st.Phase == state.PhaseConnected || (st.Phase == state.PhaseConnecting && st.Reconnecting) {
+		return st, true
+	}
+	return nil, false
 }
 
 // PrepareNewConnect tears down any previous connect/connected session

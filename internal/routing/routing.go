@@ -25,6 +25,7 @@ type Snapshot struct {
 	overrideAdded    bool
 	tunIface         string
 	tunnelHosts      []string // split tunnel: hosts (the pushed DNS servers) routed into the tunnel
+	overBlackhole    bool     // the /1 halves may currently be blackhole routes left by a kill-switch hold (see Blackhole)
 }
 
 // ipv4OverrideNets are the split-default halves that steer all IPv4 traffic
@@ -128,6 +129,13 @@ func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	// table").
 	s.overrideAdded = true
 	for _, net := range ipv4OverrideNets {
+		if s.overBlackhole {
+			// Kill-switch hold: swap the blackhole for the tunnel route in one
+			// step, so there is no instant at which traffic could leak out.
+			if err := exec.Command(sysbin.Route, ipv4OverrideChangeArgs(net, tunIface)...).Run(); err == nil {
+				continue
+			}
+		}
 		_ = exec.Command(sysbin.Route, "-n", "delete", "-net", net).Run()
 		cmd := exec.Command(sysbin.Route, ipv4OverrideAddArgs(net, tunIface)...)
 		if out, err := cmd.CombinedOutput(); err != nil {
@@ -135,13 +143,60 @@ func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 		}
 	}
 	for _, net := range ipv6RejectNets {
-		_ = exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).Run()
+		if !s.overBlackhole { // in a hold they are already in place; never open a gap
+			_ = exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).Run()
+		}
 		cmd := exec.Command(sysbin.Route, ipv6RejectAddArgs(net)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := cmd.CombinedOutput(); err != nil && !(s.overBlackhole && strings.Contains(string(out), "File exists")) {
 			return fmt.Errorf("add IPv6 reject route %s/1: %w (%s)", net, err, strings.TrimSpace(string(out)))
 		}
 	}
+	s.overBlackhole = false
 	return nil
+}
+
+// ExpectBlackhole tells this snapshot that a previous tunnel left blackhole
+// routes in place (Blackhole), so ApplyFullTunnel replaces them in one step
+// instead of deleting first.
+func (s *Snapshot) ExpectBlackhole() { s.overBlackhole = true }
+
+// Blackhole is the kill switch: it turns the two IPv4 /1 halves (and the IPv6
+// rejects) into routes that drop everything, so once the tunnel interface is
+// gone traffic cannot fall back to the physical network and leak outside the
+// VPN while the client reconnects. On-link/LAN prefixes stay reachable (they
+// are more specific), and the host route to the VPN server is untouched, so
+// the reconnect itself still gets out. Undone by Restore/RestoreByServerIP,
+// which remove routes by destination, whatever their kind.
+func (s *Snapshot) Blackhole() error {
+	s.overrideAdded = true
+	s.overBlackhole = true
+	var firstErr error
+	for _, net := range ipv4OverrideNets {
+		if err := exec.Command(sysbin.Route, ipv4BlackholeChangeArgs(net)...).Run(); err == nil {
+			continue // swapped in place: no gap
+		}
+		if out, err := exec.Command(sysbin.Route, ipv4BlackholeAddArgs(net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") && firstErr == nil {
+			firstErr = fmt.Errorf("blackhole %s: %w (%s)", net, err, strings.TrimSpace(string(out)))
+		}
+	}
+	for _, net := range ipv6RejectNets {
+		if out, err := exec.Command(sysbin.Route, ipv6RejectAddArgs(net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") && firstErr == nil {
+			firstErr = fmt.Errorf("IPv6 reject %s/1: %w (%s)", net, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return firstErr
+}
+
+func ipv4BlackholeChangeArgs(net string) []string {
+	return []string{"-n", "change", "-net", net, "127.0.0.1", "-blackhole"}
+}
+
+func ipv4BlackholeAddArgs(net string) []string {
+	return []string{"-n", "add", "-static", "-net", net, "127.0.0.1", "-blackhole"}
+}
+
+func ipv4OverrideChangeArgs(net, tunIface string) []string {
+	return []string{"-n", "change", "-net", net, "-interface", tunIface}
 }
 
 // RouteHostsViaTunnel sends traffic for hosts into the tunnel. Split tunnel
@@ -227,9 +282,15 @@ func (s *Snapshot) reassertCommands() [][]string {
 // whatever less-specific route is left — which, under full-tunnel, points
 // right back into the tunnel interface that route was supposed to bypass.
 // elevate is called around each reassertion since these need root.
-func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, interval time.Duration) {
+//
+// Reassertion is event-driven: each `reassert` spawns one `route` process per
+// managed route, which is too much to do on a fixed short timer for the whole
+// life of a laptop session. Callers send on kick when the kernel reports a
+// route was deleted (see internal/netwatch); interval is only a slow safety
+// net for a deletion that produced no event.
+func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, interval time.Duration, kick <-chan struct{}) {
 	if interval <= 0 {
-		interval = 10 * time.Second
+		interval = 2 * time.Minute
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -238,11 +299,12 @@ func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = elevate(func() error {
-				s.reassert()
-				return nil
-			})
+		case <-kick:
 		}
+		_ = elevate(func() error {
+			s.reassert()
+			return nil
+		})
 	}
 }
 
@@ -250,9 +312,15 @@ func (s *Snapshot) Watch(ctx context.Context, elevate func(func() error) error, 
 // safe to call multiple times and safe to call with a zero-value Snapshot
 // reconstructed from disk (see Repair), because every removal tolerates
 // "route not found" instead of failing.
-func (s *Snapshot) Restore() error {
+func (s *Snapshot) Restore() error { return s.restore(true) }
+
+// RestoreKeepingBlackhole is Restore minus the /1 overrides and IPv6 rejects:
+// used while the kill switch holds traffic (see Blackhole).
+func (s *Snapshot) RestoreKeepingBlackhole() error { return s.restore(false) }
+
+func (s *Snapshot) restore(removeOverrides bool) error {
 	var errs []string
-	if s.overrideAdded {
+	if s.overrideAdded && removeOverrides {
 		for _, net := range ipv4OverrideNets {
 			if out, err := exec.Command(sysbin.Route, "-n", "delete", "-net", net).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove override route %s: %v (%s)", net, err, strings.TrimSpace(string(out))))

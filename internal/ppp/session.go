@@ -375,3 +375,11 @@ func runAuth(ctx context.Context, t Transport, username, password string, magic 
 		}
 	}
 }
+
+// TerminateNoWait sends the LCP Terminate-Request and returns at once. Used
+// when the peer has already stopped answering: waiting the full Terminate
+// timeout for an Ack that cannot come only delays the reconnect.
+func TerminateNoWait(t Transport, id uint8) {
+	req := ControlPacket{Code: CodeTerminateRequest, Identifier: id}
+	_ = t.SendFrame(ProtoLCP, req.Marshal())
+}
