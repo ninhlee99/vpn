@@ -224,12 +224,29 @@ Binary tự hạ quyền về user thường ngay khi khởi động, và chỉ 
 
 ### Build và cài bản local
 
+Mọi lệnh dưới đây chạy **ở thư mục gốc của repo** (nơi có `go.mod`). Chạy ở chỗ khác sẽ báo `go.mod file not found`.
+
 ```bash
+git clone https://github.com/tms-ninhle/vpn.git && cd vpn
+git checkout <branch>          # tuỳ chọn: thử code của một branch / PR
+
+# CLI — cài đúng chỗ và đúng quyền như installer (setuid-root + file owner)
 go build -o vpn ./cmd/vpn
-sudo install -o root -g wheel -m 4755 vpn /usr/local/bin/vpn       # setuid-root, giống installer
+sudo install -o root -g wheel -m 4755 vpn /usr/local/bin/vpn
 id -u | sudo tee /etc/vpn-owner-uid >/dev/null && sudo chmod 600 /etc/vpn-owner-uid
 
-bash build.sh                  # app: build/TMS VPN.app (universal arm64 + x86_64)
+# App — build.sh chỉ build ra build/TMS VPN.app, bước ditto mới cài vào /Applications
+bash build.sh
+ditto "build/TMS VPN.app" "/Applications/TMS VPN.app"
+```
+
+### Thử một PR mà không có Xcode 26
+
+CI build sẵn app cho mọi PR. Cài CLI từ branch của PR như trên, rồi lấy app từ artifact thay cho `bash build.sh`:
+
+```bash
+gh run download <run-id> --repo tms-ninhle/vpn -n TMS-VPN-app     # run-id: tab Checks của PR → workflow test
+unzip TMS-VPN.app.zip && ditto "TMS VPN.app" "/Applications/TMS VPN.app"
 ```
 
 ### Test
