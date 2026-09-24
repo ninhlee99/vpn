@@ -77,7 +77,7 @@ Usage:
   vpn profile remove <name>
   vpn account add <profile> <account> [--default] [--password pw]
   vpn diagnose [--profile name] [--server host] [--json]
-  vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose]  (always runs in the background)
+  vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose] [--rekey-after 2m]  (always runs in the background)
   vpn disconnect
   vpn status [--json]
   vpn repair

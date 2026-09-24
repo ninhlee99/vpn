@@ -46,8 +46,16 @@ type Session struct {
 	NATDetected  bool
 	LocalIP      net.IP
 	nextMsgID    uint32
-	lastIV       []byte // last ciphertext block sent/received in this phase, seeds the next message's IV
-	floated      bool   // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
+	lastIV       []byte // Main Mode's running CBC chain: last ciphertext block sent/received
+	phase1IV     []byte // lastIV as Main Mode left it; seeds every later exchange's first IV
+
+	// EstablishedAt and Lifetime describe the IKE SA itself (the responder's
+	// chosen life duration). A Quick Mode rekey needs a live IKE SA.
+	EstablishedAt time.Time
+	Lifetime      time.Duration
+
+	dp      *dataPlane // set by StartDataPhase; from then on the reader owns the socket
+	floated bool       // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
 }
 
 // nonESPMarker is RFC 3947 §3's 4 zero bytes prepended to every IKE (not
@@ -201,6 +209,9 @@ func (s *Session) SendESP(pkt []byte) error {
 // consuming (and logging) any interleaved IKE Informational message instead
 // of returning it — mirrors exchangeQuickMode's tolerance for keepalives.
 func (s *Session) RecvESP(ctx context.Context) ([]byte, error) {
+	if s.dp != nil {
+		return s.recvESPDataPhase(ctx)
+	}
 	for {
 		deadline, ok := ctx.Deadline()
 		if !ok {
@@ -320,14 +331,14 @@ func (s *Session) logInformational(h Header, encBody []byte) {
 		return
 	}
 	bs := blockSize(s.Transform)
-	if len(encBody)%bs != 0 || s.lastIV == nil {
+	if len(encBody)%bs != 0 || s.phase1IV == nil {
 		vpnlog.Info(stage, "received Informational exchange (undecryptable)", nil)
 		return
 	}
 	// RFC 2409 §5.5: a new exchange (Informational or Quick Mode) does not
 	// reuse the last Phase 1 ciphertext block as its IV directly — it seeds
 	// a fresh one from hash(last Phase 1 IV | this message's Message-ID).
-	iv, err := informationalIV(s.Transform.Hash, s.lastIV, h.MessageID, bs)
+	iv, err := informationalIV(s.Transform.Hash, s.phase1IV, h.MessageID, bs)
 	if err != nil {
 		vpnlog.Info(stage, "received Informational exchange (IV derivation failed)", vpnlog.Fields{"err": err})
 		return
@@ -588,7 +599,14 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 	}
 
 	s.nextMsgID = 0
+	// Every later exchange on this IKE SA (Quick Mode, Informational)
+	// derives its first IV from this block, RFC 2409 §5.5 — not from
+	// whatever the most recent exchange left behind.
+	s.phase1IV = append([]byte{}, s.lastIV...)
+	s.EstablishedAt = time.Now()
+	s.Lifetime = time.Duration(chosen.LifeSecs) * time.Second
 	vpnlog.Timed(stage, "Phase 1 ESTABLISHED", start)
+	vpnlog.Info(stage, "IKE SA lifetime", vpnlog.Fields{"seconds": chosen.LifeSecs})
 	return nil
 }
 

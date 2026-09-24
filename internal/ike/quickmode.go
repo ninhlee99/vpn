@@ -1,11 +1,11 @@
 package ike
 
 import (
-	"crypto/hmac"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"net"
+	"time"
 
 	"vpn/internal/vpnlog"
 )
@@ -74,7 +74,18 @@ type ChildSA struct {
 type QuickModeResult struct {
 	Inbound  ChildSA // decrypts packets we receive (our SPI, sent to the peer so *they* use it as ESP's SPI when sending to us)
 	Outbound ChildSA // encrypts packets we send (peer's SPI)
+	// Lifetime is the shortest of what we proposed and what the responder
+	// answered (chosen SA attributes or a RESPONDER-LIFETIME notify): the
+	// SA pair must be replaced before it elapses.
+	Lifetime time.Duration
 }
+
+// espLifetime is the life duration we propose for every ESP SA.
+const espLifetime = 3600 * time.Second
+
+// notifyResponderLifetime is RFC 2407 §4.6.3.1's RESPONDER-LIFETIME: the
+// responder accepted our proposal but will expire the SA sooner.
+const notifyResponderLifetime = 24576
 
 // espProposalFor mirrors ParseProposal's cipher-hash vocabulary (entrypoint.sh's
 // esp= line uses the same "aes256-sha256" style, just without a DH group).
@@ -229,6 +240,9 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 		return chosenESP{}, fmt.Errorf("unsupported ESP transform-id %d", body[1])
 	}
 	data := body[4:]
+	// RFC 2407 §4.5: a Life Duration applies to the Life Type preceding it;
+	// only a seconds-based duration bounds the SA in time.
+	var lifeType uint32
 	for len(data) > 0 {
 		if len(data) < 4 {
 			break
@@ -263,6 +277,12 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 			}
 		case ipsecAttrKeyLength:
 			t.KeyBits = int(val)
+		case ipsecAttrLifeType:
+			lifeType = val
+		case ipsecAttrLifeDuration:
+			if lifeType == lifeTypeSeconds {
+				t.LifeSecs = val
+			}
 		}
 		data = data[consumed:]
 	}
@@ -273,6 +293,60 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 		t.KeyBits = 128
 	}
 	return chosenESP{SPI: spiVal, Transform: t}, nil
+}
+
+// responderLifetimeSecs extracts the seconds lifetime from a
+// RESPONDER-LIFETIME notify body (RFC 2408 §3.14 layout: DOI, protocol,
+// SPI size, notify type, SPI, then SA attributes). 0 means none present.
+func responderLifetimeSecs(body []byte) uint32 {
+	if len(body) < 8 || uint16(body[6])<<8|uint16(body[7]) != notifyResponderLifetime {
+		return 0
+	}
+	spiSize := int(body[5])
+	if len(body) < 8+spiSize {
+		return 0
+	}
+	attrs := body[8+spiSize:]
+	var lifeType, secs uint32
+	for len(attrs) >= 4 {
+		typ := binary.BigEndian.Uint16(attrs[0:2])
+		var val uint32
+		consumed := 4
+		if typ&0x8000 != 0 {
+			val = uint32(binary.BigEndian.Uint16(attrs[2:4]))
+		} else {
+			l := int(binary.BigEndian.Uint16(attrs[2:4]))
+			if len(attrs) < 4+l {
+				break
+			}
+			for _, b := range attrs[4 : 4+l] {
+				val = val<<8 | uint32(b)
+			}
+			consumed += l
+		}
+		switch typ &^ 0x8000 {
+		case ipsecAttrLifeType:
+			lifeType = val
+		case ipsecAttrLifeDuration:
+			if lifeType == lifeTypeSeconds {
+				secs = val
+			}
+		}
+		attrs = attrs[consumed:]
+	}
+	return secs
+}
+
+// effectiveLifetime is the shortest non-zero of the proposed, chosen and
+// responder-notified lifetimes.
+func effectiveLifetime(proposed time.Duration, secs ...uint32) time.Duration {
+	life := proposed
+	for _, v := range secs {
+		if d := time.Duration(v) * time.Second; v > 0 && d < life {
+			life = d
+		}
+	}
+	return life
 }
 
 // offeredESP reports whether the responder's choice is one of the
@@ -298,21 +372,9 @@ func offeredESP(chosen Transform, offered []Transform) bool {
 // its own, so the responder's SA choice, nonce and SPI would be accepted
 // as received, bit flips and all.
 func verifyQuickModeHash2(hashAlg int, skeyidA []byte, msgID uint32, ni []byte, firstType uint8, payloads []RawPayload, plain []byte) error {
-	if firstType != PayloadHash || len(payloads) == 0 {
-		return fmt.Errorf("QM2 does not start with a HASH payload")
-	}
-	hashLen := 4 + len(payloads[0].Body)
-	total := 0
-	for _, p := range payloads {
-		total += 4 + len(p.Body)
-	}
-	data := append(append(beUint32(msgID), ni...), plain[hashLen:total]...)
-	want, err := prf(hashAlg, skeyidA, data)
-	if err != nil {
-		return err
-	}
-	if !hmac.Equal(want, payloads[0].Body) {
-		return fmt.Errorf("QM2 HASH(2) mismatch — response not authenticated by the IKE SA")
+	prefix := append(beUint32(msgID), ni...)
+	if err := verifyLeadingHash(hashAlg, skeyidA, prefix, firstType, payloads, plain); err != nil {
+		return fmt.Errorf("QM2 HASH(2): %w", err)
 	}
 	return nil
 }
@@ -387,13 +449,22 @@ func espKeyLens(t Transform) (encLen, authLen int) {
 // established Phase 1 session, using entrypoint.sh's transport-mode,
 // UDP-encapsulated ESP parameters (leftprotoport/rightprotoport = 17/1701).
 func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP net.IP) (*QuickModeResult, error) {
+	return s.quickMode(espProposals, localIP, remoteIP, s.exchangeQuickMode, s.sendRaw)
+}
+
+// quickMode runs one initiator Quick Mode exchange. roundTrip sends QM1
+// (retransmitting as needed) and returns the responder's QM2; send
+// delivers the one-shot QM3. Initial setup reads the socket directly
+// (exchangeQuickMode); a rekey during the data phase goes through the
+// control plane's demultiplexer instead (see RekeyQuickMode).
+func (s *Session) quickMode(espProposals []string, localIP, remoteIP net.IP, roundTrip func(msg []byte, msgID uint32) ([]byte, error), send func([]byte) error) (*QuickModeResult, error) {
 	transforms := make([]Transform, 0, len(espProposals))
 	for _, p := range espProposals {
 		t, err := espProposalFor(p)
 		if err != nil {
 			return nil, err
 		}
-		t.LifeSecs = 3600
+		t.LifeSecs = uint32(espLifetime / time.Second)
 		transforms = append(transforms, t)
 	}
 
@@ -462,7 +533,7 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 	// message of *this same* exchange (QM2, QM3), regardless of which side
 	// sends it, chains normally from the previous message's ciphertext tail
 	// instead, exactly like MM6 chained from MM5 within Phase 1.
-	iv, err := informationalIV(s.Transform.Hash, s.lastIV, msgID, bs)
+	iv, err := informationalIV(s.Transform.Hash, s.phase1IV, msgID, bs)
 	if err != nil {
 		return nil, err
 	}
@@ -470,14 +541,16 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 	if err != nil {
 		return nil, err
 	}
-	s.lastIV = cipher[len(cipher)-bs:]
+	// This exchange's own CBC chain — local, so concurrent exchanges on the
+	// same IKE SA (a rekey alongside an Informational) never share state.
+	ivChain := cipher[len(cipher)-bs:]
 
 	hdr := Header{InitiatorSPI: s.InitiatorSPI, ResponderSPI: s.ResponderSPI, NextPayload: PayloadHash, Version: 0x10, ExchangeType: ExchangeQuickMode, Flags: FlagEncryption, MessageID: msgID}
 	hdr.Length = uint32(headerLen + len(cipher))
 	qm1 := append(hdr.Marshal(), cipher...)
 
 	vpnlog.Info(stage, "QM1 sent", vpnlog.Fields{"msg_id": msgID, "bytes": len(qm1)})
-	resp, err := s.exchangeQuickMode(qm1, msgID)
+	resp, err := roundTrip(qm1, msgID)
 	if err != nil {
 		return nil, fmt.Errorf("QM1/QM2: %w", err)
 	}
@@ -486,24 +559,29 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 		return nil, err
 	}
 	respBody := resp[headerLen:]
-	plainResp, err := cbcDecrypt(s.Transform, s.Keys.EncKey, s.lastIV, respBody)
+	plainResp, err := cbcDecrypt(s.Transform, s.Keys.EncKey, ivChain, respBody)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt QM2: %w", err)
 	}
 	if len(respBody) >= bs {
-		s.lastIV = respBody[len(respBody)-bs:]
+		ivChain = respBody[len(respBody)-bs:]
 	}
 	payloads, err := SplitPayloads(respHdr.NextPayload, plainResp)
 	if err != nil {
 		return nil, fmt.Errorf("QM2 payload chain: %w", err)
 	}
 	var peerSABody, peerNonce []byte
+	var notifiedLife uint32
 	for _, p := range payloads {
 		switch p.Type {
 		case PayloadSA:
 			peerSABody = p.Body
 		case PayloadNonce:
 			peerNonce = p.Body
+		case PayloadNotify:
+			if v := responderLifetimeSecs(p.Body); v > 0 {
+				notifiedLife = v
+			}
 		}
 	}
 	if peerSABody == nil || peerNonce == nil {
@@ -530,15 +608,14 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 	}
 	hash3Payload := marshalPayload(PayloadNone, hash3)
 	padded3 := padToBlock(hash3Payload, bs)
-	cipher3, err := cbcEncrypt(s.Transform, s.Keys.EncKey, s.lastIV, padded3)
+	cipher3, err := cbcEncrypt(s.Transform, s.Keys.EncKey, ivChain, padded3)
 	if err != nil {
 		return nil, err
 	}
-	s.lastIV = cipher3[len(cipher3)-bs:]
 	hdr3 := Header{InitiatorSPI: s.InitiatorSPI, ResponderSPI: s.ResponderSPI, NextPayload: PayloadHash, Version: 0x10, ExchangeType: ExchangeQuickMode, Flags: FlagEncryption, MessageID: msgID}
 	hdr3.Length = uint32(headerLen + len(cipher3))
 	qm3 := append(hdr3.Marshal(), cipher3...)
-	if err := s.sendRaw(qm3); err != nil {
+	if err := send(qm3); err != nil {
 		return nil, fmt.Errorf("send QM3: %w", err)
 	}
 	vpnlog.Info(stage, "QM3 sent (exchange complete)", nil)
@@ -556,8 +633,11 @@ func (s *Session) EstablishQuickMode(espProposals []string, localIP, remoteIP ne
 	result := &QuickModeResult{
 		Outbound: ChildSA{SPI: chosen.SPI, EncKey: outKeymat[:encLen], AuthKey: outKeymat[encLen:], Transform: chosen.Transform},
 		Inbound:  ChildSA{SPI: mySPI, EncKey: inKeymat[:encLen], AuthKey: inKeymat[encLen:], Transform: chosen.Transform},
+		Lifetime: effectiveLifetime(espLifetime, chosen.Transform.LifeSecs, notifiedLife),
 	}
-	vpnlog.Info(stage, "Quick Mode ESTABLISHED", vpnlog.Fields{"in_spi": mySPI, "out_spi": chosen.SPI})
+	vpnlog.Info(stage, "Quick Mode ESTABLISHED", vpnlog.Fields{
+		"in_spi": fmt.Sprintf("%08x", mySPI), "out_spi": fmt.Sprintf("%08x", chosen.SPI), "lifetime_s": int(result.Lifetime / time.Second),
+	})
 	return result, nil
 }
 

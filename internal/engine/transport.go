@@ -8,7 +8,6 @@ import (
 	"syscall"
 
 	"vpn/internal/ike"
-	"vpn/internal/ipsec"
 	"vpn/internal/l2tp"
 	"vpn/internal/ppp"
 	"vpn/internal/vpnlog"
@@ -22,8 +21,7 @@ import (
 // packets for its own control/data traffic, only the payload IPsec expects.
 type espTransport struct {
 	sess        *ike.Session
-	out         *ipsec.SA
-	in          *ipsec.SA
+	sas         *saSet // current pair for sending; every live pair for receiving (see rekey.go)
 	repairRoute func() error
 }
 
@@ -42,7 +40,7 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	// a non-zero checksum's pseudo-header and cannot adjust encrypted ESP.
 	payload := append(udpHdr, l2tpMsg...)
 
-	pkt, err := t.out.Encrypt(payload, protoUDP)
+	pkt, err := t.sas.current().out.Encrypt(payload, protoUDP)
 	if err != nil {
 		return fmt.Errorf("ESP encrypt: %w", err)
 	}
@@ -69,7 +67,14 @@ func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		payload, nextHeader, err := t.in.Decrypt(pkt)
+		if len(pkt) < 4 {
+			continue
+		}
+		in := t.sas.inbound(binary.BigEndian.Uint32(pkt[0:4]))
+		if in == nil {
+			continue // an SA already deleted/expired, or not ours
+		}
+		payload, nextHeader, err := in.Decrypt(pkt)
 		if err != nil {
 			// A stray/replayed/corrupt ESP packet is not fatal to the
 			// session — log and keep waiting rather than aborting the

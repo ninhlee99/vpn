@@ -131,3 +131,35 @@ func TestESPSequenceNeverCycles(t *testing.T) {
 		t.Fatal("sequence number wrapped instead of failing")
 	}
 }
+
+// Concurrent senders must never reuse a sequence number (run with -race).
+func TestESPConcurrentEncryptUniqueSequence(t *testing.T) {
+	out, _ := suites[0].pair(t)
+	const workers, each = 8, 200
+	seqs := make(chan uint32, workers*each)
+	done := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		go func() {
+			for i := 0; i < each; i++ {
+				pkt, err := out.Encrypt([]byte("x"), 17)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				seqs <- uint32(pkt[4])<<24 | uint32(pkt[5])<<16 | uint32(pkt[6])<<8 | uint32(pkt[7])
+			}
+			done <- struct{}{}
+		}()
+	}
+	for w := 0; w < workers; w++ {
+		<-done
+	}
+	close(seqs)
+	seen := map[uint32]bool{}
+	for s := range seqs {
+		if seen[s] {
+			t.Fatalf("sequence %d used twice", s)
+		}
+		seen[s] = true
+	}
+}

@@ -1,0 +1,331 @@
+package ike
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"vpn/internal/vpnlog"
+)
+
+// Events are the control-plane notifications StartDataPhase delivers. Both
+// are only ever called for messages whose HASH(1) verified under this IKE
+// SA — an unauthenticated Delete could otherwise tear the tunnel down.
+type Events struct {
+	// DeleteESP reports the peer deleted the ESP SAs with these SPIs.
+	DeleteESP func(spis []uint32)
+	// DeleteIKE reports the peer deleted this IKE SA: no further Quick Mode
+	// (and so no rekey) is possible on it.
+	DeleteIKE func()
+}
+
+// dataPlane is the state StartDataPhase adds to a Session.
+type dataPlane struct {
+	espIn  chan []byte
+	done   chan struct{} // closed when the reader exits
+	errMu  sync.Mutex
+	err    error // why the reader exited
+	events Events
+
+	pendingMu sync.Mutex
+	pending   map[uint32]chan []byte // Quick Mode replies we are waiting for, by message ID
+}
+
+// recvIdleTimeout keeps RecvESP's historical contract: with no deadline on
+// the caller's context, 30s without a single packet from the server is an
+// error (the LNS keeps the link alive with LCP echoes well inside that).
+const recvIdleTimeout = 30 * time.Second
+
+// StartDataPhase hands the socket to a single reader goroutine for the rest
+// of the session. Until now each exchange read the socket itself, which
+// only works while nothing else is: once ESP traffic flows, a rekey's
+// Quick Mode reply and an ESP packet can arrive in either order on the same
+// port, and whichever goroutine happened to be reading would swallow the
+// other's datagram. The reader routes ESP to RecvESP, Quick Mode replies to
+// the exchange waiting on that message ID, and Informational messages to
+// handleInformational. Call once, right after the first Quick Mode.
+func (s *Session) StartDataPhase(ctx context.Context, events Events) {
+	dp := &dataPlane{
+		espIn:   make(chan []byte, 256),
+		done:    make(chan struct{}),
+		events:  events,
+		pending: map[uint32]chan []byte{},
+	}
+	s.dp = dp
+	go s.readLoop(ctx, dp)
+}
+
+func (s *Session) readLoop(ctx context.Context, dp *dataPlane) {
+	defer close(dp.done)
+	buf := make([]byte, 65535)
+	for {
+		if ctx.Err() != nil {
+			dp.setErr(ctx.Err())
+			return
+		}
+		// A short deadline only so ctx cancellation is noticed promptly.
+		_ = s.conn.SetReadDeadline(time.Now().Add(time.Second))
+		n, from, err := s.conn.ReadFromUDP(buf)
+		if err != nil {
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			dp.setErr(err)
+			return
+		}
+		if !from.IP.Equal(s.serverIP) {
+			continue
+		}
+		pkt := append([]byte(nil), buf[:n]...)
+		if ike, ok := s.ikeMessage(pkt); ok {
+			s.dispatchIKE(ike)
+			continue
+		}
+		select {
+		case dp.espIn <- pkt:
+		case <-ctx.Done():
+			dp.setErr(ctx.Err())
+			return
+		}
+	}
+}
+
+// ikeMessage tells an IKE message apart from ESP on the shared socket and
+// returns it without framing. Floated (RFC 3948 §2.1): IKE carries the
+// 4-byte zero non-ESP marker, ESP never does (a real SPI is never zero).
+// Not floated: an IKE message starts with this SA's initiator cookie.
+func (s *Session) ikeMessage(pkt []byte) ([]byte, bool) {
+	if len(pkt) >= 4 && bytes.Equal(pkt[:4], nonESPMarker) {
+		return pkt[4:], true
+	}
+	if !s.floated && len(pkt) >= headerLen && bytes.Equal(pkt[:8], s.InitiatorSPI[:]) {
+		return pkt, true
+	}
+	return nil, false
+}
+
+func (s *Session) dispatchIKE(msg []byte) {
+	if len(msg) < headerLen {
+		return
+	}
+	h, err := ParseHeader(msg)
+	if err != nil {
+		return
+	}
+	if h.InitiatorSPI != s.InitiatorSPI {
+		// A different IKE SA from the server — typically a new Main Mode
+		// it initiates to re-authenticate. This client cannot act as a
+		// Main Mode responder; logged so a long-session test shows it.
+		vpnlog.Error(stage, "server sent a message for another IKE SA (re-authentication attempt?) — not supported", vpnlog.Fields{
+			"exchange": h.ExchangeType, "msg_id": h.MessageID,
+		})
+		return
+	}
+	switch h.ExchangeType {
+	case ExchangeQuickMode:
+		s.dp.pendingMu.Lock()
+		ch := s.dp.pending[h.MessageID]
+		s.dp.pendingMu.Unlock()
+		if ch == nil {
+			vpnlog.Error(stage, "server-initiated Quick Mode (its own rekey) — not supported; relying on client-initiated rekey", vpnlog.Fields{"msg_id": h.MessageID})
+			return
+		}
+		select {
+		case ch <- msg:
+		default: // a duplicate while the first is still being processed
+		}
+	case ExchangeInformational:
+		s.handleInformational(h, msg[headerLen:])
+	default:
+		vpnlog.Info(stage, "ignored IKE exchange during data phase", vpnlog.Fields{"exchange": h.ExchangeType})
+	}
+}
+
+// handleInformational authenticates and acts on an Informational exchange
+// (RFC 2409 §5.7): HASH(1) = prf(SKEYID_a, M-ID | N/D payloads).
+func (s *Session) handleInformational(h Header, encBody []byte) {
+	payloads, plain, err := s.decryptExchange(h, encBody)
+	if err != nil {
+		vpnlog.Error(stage, "undecodable Informational exchange", vpnlog.Fields{"err": err})
+		return
+	}
+	if err := verifyHash1(s.Transform.Hash, s.Keys.SKEYIDa, h.MessageID, h.NextPayload, payloads, plain); err != nil {
+		vpnlog.Error(stage, "Informational exchange failed authentication — ignored", vpnlog.Fields{"err": err})
+		return
+	}
+	for _, p := range payloads[1:] {
+		switch p.Type {
+		case PayloadNotify:
+			if len(p.Body) >= 8 {
+				vpnlog.Info(stage, "server sent Notify", vpnlog.Fields{"notify_type": binary.BigEndian.Uint16(p.Body[6:8])})
+			}
+		case PayloadDelete:
+			proto, spis, err := parseDelete(p.Body)
+			if err != nil {
+				vpnlog.Error(stage, "malformed Delete payload", vpnlog.Fields{"err": err})
+				continue
+			}
+			switch proto {
+			case protoISAKMP:
+				vpnlog.Error(stage, "server deleted the IKE SA — no further rekey possible on it", nil)
+				if s.dp.events.DeleteIKE != nil {
+					s.dp.events.DeleteIKE()
+				}
+			case protoIPsecESP:
+				vpnlog.Info(stage, "server deleted ESP SAs", vpnlog.Fields{"spis": fmt.Sprintf("%08x", spis)})
+				if s.dp.events.DeleteESP != nil {
+					s.dp.events.DeleteESP(spis)
+				}
+			}
+		}
+	}
+}
+
+// decryptExchange decrypts the first message of a peer-initiated exchange,
+// whose IV derives from the Phase 1 IV and its message ID (RFC 2409 §5.5).
+func (s *Session) decryptExchange(h Header, encBody []byte) ([]RawPayload, []byte, error) {
+	bs := blockSize(s.Transform)
+	if s.Keys == nil || s.phase1IV == nil || len(encBody) == 0 || len(encBody)%bs != 0 {
+		return nil, nil, fmt.Errorf("not decryptable under this IKE SA")
+	}
+	iv, err := informationalIV(s.Transform.Hash, s.phase1IV, h.MessageID, bs)
+	if err != nil {
+		return nil, nil, err
+	}
+	plain, err := cbcDecrypt(s.Transform, s.Keys.EncKey, iv, encBody)
+	if err != nil {
+		return nil, nil, err
+	}
+	payloads, err := SplitPayloads(h.NextPayload, plain)
+	if err != nil {
+		return nil, nil, err
+	}
+	return payloads, plain, nil
+}
+
+const protoISAKMP = 1
+
+// parseDelete decodes a Delete payload body (RFC 2408 §3.15): DOI(4),
+// Protocol-Id(1), SPI Size(1), # of SPIs(2), SPIs. ISAKMP SA deletes carry
+// 16-byte cookie pairs, so only ESP's 4-byte SPIs are returned as values.
+func parseDelete(body []byte) (proto uint8, spis []uint32, err error) {
+	if len(body) < 8 {
+		return 0, nil, fmt.Errorf("Delete payload too short")
+	}
+	proto, spiSize, n := body[4], int(body[5]), int(binary.BigEndian.Uint16(body[6:8]))
+	if len(body) < 8+spiSize*n {
+		return 0, nil, fmt.Errorf("Delete payload lists %d SPIs of %d bytes but is %d bytes long", n, spiSize, len(body))
+	}
+	if spiSize == 4 {
+		for i := 0; i < n; i++ {
+			spis = append(spis, binary.BigEndian.Uint32(body[8+4*i:]))
+		}
+	}
+	return proto, spis, nil
+}
+
+// verifyHash1 checks a peer-initiated message's leading HASH payload,
+// prf(SKEYID_a, M-ID | rest) (RFC 2409 §5.5/§5.7).
+func verifyHash1(hashAlg int, skeyidA []byte, msgID uint32, firstType uint8, payloads []RawPayload, plain []byte) error {
+	return verifyLeadingHash(hashAlg, skeyidA, beUint32(msgID), firstType, payloads, plain)
+}
+
+// verifyLeadingHash checks that the message's first payload is
+// prf(SKEYID_a, prefix | every payload after it), headers included and
+// encryption padding excluded — the shape shared by HASH(1) and HASH(2).
+func verifyLeadingHash(hashAlg int, skeyidA, prefix []byte, firstType uint8, payloads []RawPayload, plain []byte) error {
+	if firstType != PayloadHash || len(payloads) == 0 {
+		return fmt.Errorf("message does not start with a HASH payload")
+	}
+	hashLen := 4 + len(payloads[0].Body)
+	total := 0
+	for _, p := range payloads {
+		total += 4 + len(p.Body)
+	}
+	want, err := prf(hashAlg, skeyidA, append(append([]byte{}, prefix...), plain[hashLen:total]...))
+	if err != nil {
+		return err
+	}
+	if !hmac.Equal(want, payloads[0].Body) {
+		return fmt.Errorf("HASH mismatch — message not authenticated by the IKE SA")
+	}
+	return nil
+}
+
+// controlRoundTrip is Quick Mode's roundTrip during the data phase: send
+// (with retransmits) and wait for the reader to route the reply here.
+func (s *Session) controlRoundTrip(msg []byte, msgID uint32) ([]byte, error) {
+	if s.dp == nil {
+		return nil, fmt.Errorf("control plane not started")
+	}
+	ch := make(chan []byte, 1)
+	s.dp.pendingMu.Lock()
+	s.dp.pending[msgID] = ch
+	s.dp.pendingMu.Unlock()
+	defer func() {
+		s.dp.pendingMu.Lock()
+		delete(s.dp.pending, msgID)
+		s.dp.pendingMu.Unlock()
+	}()
+	for attempt := 0; attempt <= maxRetransmits; attempt++ {
+		if err := s.sendRaw(msg); err != nil {
+			return nil, fmt.Errorf("send: %w", err)
+		}
+		select {
+		case resp := <-ch:
+			return resp, nil
+		case <-s.dp.done:
+			return nil, fmt.Errorf("control plane stopped: %w", s.dp.getErr())
+		case <-time.After(retransmitInterval):
+		}
+	}
+	return nil, fmt.Errorf("IKE_TIMEOUT: Quick Mode rekey: no response after %d attempts", maxRetransmits+1)
+}
+
+// RekeyQuickMode negotiates a fresh ESP SA pair on this IKE SA while the
+// tunnel keeps running (RFC 2409 §5.5 — a rekey is just another Quick
+// Mode). Requires StartDataPhase.
+func (s *Session) RekeyQuickMode(espProposals []string, localIP, remoteIP net.IP) (*QuickModeResult, error) {
+	return s.quickMode(espProposals, localIP, remoteIP, s.controlRoundTrip, s.sendRaw)
+}
+
+// recvESPDataPhase is RecvESP once the reader owns the socket.
+func (s *Session) recvESPDataPhase(ctx context.Context) ([]byte, error) {
+	var idle <-chan time.Time
+	if _, ok := ctx.Deadline(); !ok {
+		t := time.NewTimer(recvIdleTimeout)
+		defer t.Stop()
+		idle = t.C
+	}
+	select {
+	case pkt := <-s.dp.espIn:
+		return pkt, nil
+	case <-s.dp.done:
+		return nil, fmt.Errorf("IKE/ESP socket reader stopped: %w", s.dp.getErr())
+	case <-idle:
+		return nil, fmt.Errorf("no packet from the server for %s", recvIdleTimeout)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (dp *dataPlane) setErr(err error) {
+	dp.errMu.Lock()
+	defer dp.errMu.Unlock()
+	if dp.err == nil {
+		dp.err = err
+	}
+}
+
+func (dp *dataPlane) getErr() error {
+	dp.errMu.Lock()
+	defer dp.errMu.Unlock()
+	return dp.err
+}

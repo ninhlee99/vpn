@@ -47,6 +47,7 @@ type Config struct {
 	FullTunnel   bool
 	Timeout      time.Duration
 	Verbose      bool
+	RekeyAfter   time.Duration // >0: rekey this often instead of at half the SA lifetime
 }
 
 // errAbortedByDisconnect is Connect's internal sentinel for "a `disconnect`
@@ -91,6 +92,12 @@ func Connect(cfg Config) error {
 	var dev *tun.Device
 	var pppT *pppOverL2TP
 	var ipcp ppp.NegotiatedIPCP
+	var startRekey func(ctx context.Context) // set once Quick Mode succeeds
+
+	// The IKE/ESP socket reader (ike.StartDataPhase) runs from Quick Mode
+	// until Connect returns, on every path.
+	ikeCtx, stopIKE := context.WithCancel(sigCtx)
+	defer stopIKE()
 
 	setupErr := privilege.Elevate(func() error {
 		// vpnlog.Init has to run here, not before Elevate: /var/log/vpn.log
@@ -186,22 +193,30 @@ func Connect(cfg Config) error {
 			_ = rtSnapshot.Restore()
 			return fail("IPSEC_FAILURE", "Quick Mode (ESP SA) negotiation", err)
 		}
-		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
+		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": fmt.Sprintf("%08x", qm.Inbound.SPI), "out_spi": fmt.Sprintf("%08x", qm.Outbound.SPI)})
 
-		outSA, err := newESPSA(qm.Outbound)
+		sas, err := newSASet(qm)
 		if err != nil {
 			_ = rtSnapshot.Restore()
-			return fail("IPSEC_FAILURE", "set up outbound ESP SA", err)
+			return fail("IPSEC_FAILURE", "set up ESP SAs", err)
 		}
-		inSA, err := newESPSA(qm.Inbound)
-		if err != nil {
-			_ = rtSnapshot.Restore()
-			return fail("IPSEC_FAILURE", "set up inbound ESP SA", err)
+		// From here on one goroutine owns the socket and demultiplexes ESP
+		// from IKE — required for rekeying while traffic flows.
+		sess.StartDataPhase(ikeCtx, ike.Events{
+			DeleteESP: func(spis []uint32) {
+				if sas.drop(spis) {
+					vpnlog.Error("ENGINE", "server deleted the ESP SA currently in use — traffic stalls until the next rekey", nil)
+				}
+			},
+		})
+		startRekey = func(ctx context.Context) {
+			go runRekey(ctx, sas, sess, func() (*ike.QuickModeResult, error) {
+				return sess.RekeyQuickMode(cfg.ESPProposals, localIP, serverIP)
+			}, qm.Lifetime, cfg.RekeyAfter)
 		}
 		espT := &espTransport{
 			sess: sess,
-			out:  outSA,
-			in:   inSA,
+			sas:  sas,
 			repairRoute: func() error {
 				return privilege.Elevate(func() error {
 					return rtSnapshot.ProtectServer(serverIP.String())
@@ -333,6 +348,7 @@ func Connect(cfg Config) error {
 	// Watch doc comment) — re-assert them periodically instead of trusting
 	// they stay in place for the whole connection.
 	go rtSnapshot.Watch(sigCtx, privilege.Elevate, 10*time.Second)
+	startRekey(sigCtx)
 
 	pumpErr := runDataPlane(sigCtx, dev, pppT)
 
