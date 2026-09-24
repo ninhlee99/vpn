@@ -193,7 +193,7 @@ func Connect(cfg Config) error {
 			_ = rtSnapshot.Restore()
 			return fail("IPSEC_FAILURE", "Quick Mode (ESP SA) negotiation", err)
 		}
-		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": qm.Inbound.SPI, "out_spi": qm.Outbound.SPI})
+		vpnlog.Info("ENGINE", "Quick Mode established", vpnlog.Fields{"in_spi": fmt.Sprintf("%08x", qm.Inbound.SPI), "out_spi": fmt.Sprintf("%08x", qm.Outbound.SPI)})
 
 		sas, err := newSASet(qm)
 		if err != nil {

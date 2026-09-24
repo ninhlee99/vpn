@@ -636,7 +636,7 @@ func (s *Session) quickMode(espProposals []string, localIP, remoteIP net.IP, rou
 		Lifetime: effectiveLifetime(espLifetime, chosen.Transform.LifeSecs, notifiedLife),
 	}
 	vpnlog.Info(stage, "Quick Mode ESTABLISHED", vpnlog.Fields{
-		"in_spi": mySPI, "out_spi": chosen.SPI, "lifetime_s": int(result.Lifetime / time.Second),
+		"in_spi": fmt.Sprintf("%08x", mySPI), "out_spi": fmt.Sprintf("%08x", chosen.SPI), "lifetime_s": int(result.Lifetime / time.Second),
 	})
 	return result, nil
 }
