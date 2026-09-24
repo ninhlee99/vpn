@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"vpn/internal/vpnlog"
@@ -54,8 +55,9 @@ type Session struct {
 	EstablishedAt time.Time
 	Lifetime      time.Duration
 
-	dp      *dataPlane // set by StartDataPhase; from then on the reader owns the socket
-	floated bool       // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
+	dp        *dataPlane // set by StartDataPhase; from then on the reader owns the socket
+	closeOnce sync.Once
+	floated   bool // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
 }
 
 // nonESPMarker is RFC 3947 §3's 4 zero bytes prepended to every IKE (not
@@ -366,11 +368,12 @@ func (s *Session) logInformational(h Header, encBody []byte) {
 func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Transform) error {
 	start := time.Now()
 
-	// --- MM1: HDR, SA[, VID(NAT-T)] ---
+	// --- MM1: HDR, SA[, VID(DPD), VID(NAT-T)] ---
 	sa := MarshalSA(transforms)
+	dpd := marshalPayload(PayloadVendorID, dpdVendorID)
 	vid := marshalPayload(PayloadNone, RFC3947VendorID())
 	saPayload := marshalPayload(PayloadVendorID, sa)
-	body := append(saPayload, vid...)
+	body := append(append(saPayload, dpd...), vid...)
 
 	hdr1 := Header{InitiatorSPI: s.InitiatorSPI, NextPayload: PayloadSA, Version: 0x10, ExchangeType: ExchangeIdentityProt}
 	hdr1.Length = uint32(headerLen + len(body))

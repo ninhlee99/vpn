@@ -73,14 +73,18 @@ func (p *testPeer) recvIKE() []byte {
 
 // encryptFirst builds a peer-initiated exchange message: HASH(1) over
 // M-ID | rest, encrypted with the IV derived from the Phase 1 IV.
-func (p *testPeer) encryptFirst(exchange uint8, msgID uint32, rest []byte, forgeHash bool) []byte {
+func (p *testPeer) encryptFirst(exchange uint8, msgID uint32, rest []byte, forgeHash bool, firstType ...uint8) []byte {
 	p.t.Helper()
 	s := p.sess
 	hash, _ := prf(s.Transform.Hash, s.Keys.SKEYIDa, append(beUint32(msgID), rest...))
 	if forgeHash {
 		hash[0] ^= 0xFF
 	}
-	plain := padToBlock(append(marshalPayload(firstPayloadType(rest), hash), rest...), 8)
+	ft := firstPayloadType(rest)
+	if len(firstType) > 0 {
+		ft = firstType[0]
+	}
+	plain := padToBlock(append(marshalPayload(ft, hash), rest...), 8)
 	iv, _ := informationalIV(s.Transform.Hash, s.phase1IV, msgID, 8)
 	ct, _ := cbcEncrypt(s.Transform, s.Keys.EncKey, iv, plain)
 	h := Header{InitiatorSPI: s.InitiatorSPI, ResponderSPI: s.ResponderSPI, NextPayload: PayloadHash, Version: 0x10, ExchangeType: exchange, Flags: FlagEncryption, MessageID: msgID}
@@ -241,5 +245,67 @@ func TestResponderLifetimeNotify(t *testing.T) {
 	}
 	if got := effectiveLifetime(espLifetime, 0, 900, 1800); got != 900*time.Second {
 		t.Fatalf("effectiveLifetime = %s, want 15m", got)
+	}
+}
+
+// decryptFromClient decrypts and authenticates a client-initiated
+// Informational message the way a server would.
+func (p *testPeer) decryptFromClient(msg []byte) []RawPayload {
+	p.t.Helper()
+	s := p.sess
+	h, err := ParseHeader(msg)
+	if err != nil || h.ExchangeType != ExchangeInformational {
+		p.t.Fatalf("not an Informational message: %v", err)
+	}
+	payloads, plain, err := s.decryptExchange(h, msg[headerLen:])
+	if err != nil {
+		p.t.Fatalf("decrypt: %v", err)
+	}
+	if err := verifyHash1(s.Transform.Hash, s.Keys.SKEYIDa, h.MessageID, h.NextPayload, payloads, plain); err != nil {
+		p.t.Fatalf("client HASH(1) does not verify: %v", err)
+	}
+	return payloads[1:]
+}
+
+func TestAnswersServerDPD(t *testing.T) {
+	peer, s := newTestPair(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s.StartDataPhase(ctx, Events{})
+
+	seq := []byte{0, 0, 0x12, 0x34}
+	spi := append(append([]byte{}, s.InitiatorSPI[:]...), s.ResponderSPI[:]...)
+	rut := marshalPayload(PayloadNone, notifyBody(protoISAKMP, notifyRUThere, spi, seq))
+	peer.sendIKE(peer.encryptFirst(ExchangeInformational, 0x3333, rut, false, PayloadNotify))
+
+	got := peer.decryptFromClient(peer.recvIKE())
+	if len(got) != 1 || got[0].Type != PayloadNotify {
+		t.Fatalf("reply payloads = %+v, want one Notify", got)
+	}
+	body := got[0].Body
+	if typ := binary.BigEndian.Uint16(body[6:8]); typ != notifyRUThereAck {
+		t.Fatalf("notify type = %d, want R-U-THERE-ACK %d", typ, notifyRUThereAck)
+	}
+	if !bytes.Equal(body[8:8+16], spi) || !bytes.Equal(body[8+16:], seq) {
+		t.Fatalf("ACK must echo SPI and sequence, got %x", body[8:])
+	}
+}
+
+func TestCloseSendsIKEDelete(t *testing.T) {
+	peer, s := newTestPair(t)
+	s.Close()
+	s.Close() // idempotent
+
+	got := peer.decryptFromClient(peer.recvIKE())
+	if len(got) != 1 || got[0].Type != PayloadDelete {
+		t.Fatalf("payloads = %+v, want one Delete", got)
+	}
+	proto, _, err := parseDelete(got[0].Body)
+	if err != nil || proto != protoISAKMP {
+		t.Fatalf("Delete proto = %d, %v; want ISAKMP", proto, err)
+	}
+	want := append(append([]byte{}, s.InitiatorSPI[:]...), s.ResponderSPI[:]...)
+	if !bytes.Equal(got[0].Body[8:], want) {
+		t.Fatalf("Delete names %x, want this SA's cookies %x", got[0].Body[8:], want)
 	}
 }
