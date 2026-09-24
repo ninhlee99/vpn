@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 
 	"golang.org/x/sys/unix"
 )
@@ -33,6 +34,13 @@ const (
 type Device struct {
 	fd   int
 	Name string
+
+	// Reused across calls: Read used to allocate a fresh buffer the size of
+	// the caller's (64 KiB) for every single packet, and Write one per
+	// packet too — pure GC churn on a path that runs for every packet.
+	rmu  sync.Mutex
+	rbuf []byte
+	wbuf sync.Pool
 }
 
 // Open creates a new utun device, letting the kernel assign the next free
@@ -80,7 +88,12 @@ func (d *Device) Close() error {
 // Read returns one raw IP packet (no protocol-family prefix) into buf,
 // which must be large enough for MTU-sized packets plus the 4-byte header.
 func (d *Device) Read(buf []byte) (int, error) {
-	raw := make([]byte, len(buf)+afInetPrefixLen)
+	d.rmu.Lock()
+	defer d.rmu.Unlock()
+	if need := len(buf) + afInetPrefixLen; cap(d.rbuf) < need {
+		d.rbuf = make([]byte, need)
+	}
+	raw := d.rbuf[:len(buf)+afInetPrefixLen]
 	n, err := unix.Read(d.fd, raw)
 	if err != nil {
 		return 0, err
@@ -107,7 +120,13 @@ func (d *Device) Write(pkt []byte) (int, error) {
 	default:
 		return 0, fmt.Errorf("write: not an IP packet (first nibble %d)", pkt[0]>>4)
 	}
-	raw := make([]byte, afInetPrefixLen+len(pkt))
+	bp, _ := d.wbuf.Get().(*[]byte)
+	if bp == nil || cap(*bp) < afInetPrefixLen+len(pkt) {
+		b := make([]byte, 0, 2048+len(pkt))
+		bp = &b
+	}
+	raw := (*bp)[:afInetPrefixLen+len(pkt)]
+	defer d.wbuf.Put(bp)
 	binary.BigEndian.PutUint32(raw[:4], family)
 	copy(raw[afInetPrefixLen:], pkt)
 	n, err := unix.Write(d.fd, raw)

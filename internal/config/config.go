@@ -21,6 +21,10 @@ type Account struct {
 // Profile is one VPN server configuration, independent of which account is
 // currently used to connect to it.
 type Profile struct {
+	// DisplayName is the label shown to the user; empty means the profile's
+	// key. The key itself never changes: Keychain entries (PSK, passwords) are
+	// filed under it, so renaming the key would orphan every stored secret.
+	DisplayName    string              `json:"display_name,omitempty"`
 	Server         string              `json:"server"`
 	ServerID       string              `json:"server_id,omitempty"`
 	IKEProposals   []string            `json:"ike_proposals,omitempty"`
@@ -37,7 +41,13 @@ type Config struct {
 	// MTU, when set, is the tunnel MTU for every profile and wins over the
 	// per-profile value: it is a property of the network the user is on, not
 	// of a server, so it is one switch rather than one per profile.
-	MTU           int                 `json:"mtu,omitempty"`
+	MTU int `json:"mtu,omitempty"`
+	// Verbose, when set, turns per-packet debug logging on or off for every
+	// connection. Nil means the default (off — see EffectiveVerbose).
+	Verbose *bool `json:"verbose,omitempty"`
+	// KillSwitch, when on, blocks all non-local traffic while a full-tunnel
+	// VPN reconnects instead of letting it flow around the tunnel unprotected.
+	KillSwitch    bool                `json:"kill_switch,omitempty"`
 	ActiveProfile string              `json:"active_profile,omitempty"`
 	Profiles      map[string]*Profile `json:"profiles"`
 
@@ -82,6 +92,18 @@ func (c *Config) EffectiveMTU(p *Profile) int {
 	}
 	return DefaultMTU
 }
+
+// EffectiveVerbose reports whether connections should write protocol-level debug
+// logging. Off unless the user turned it on. Connection milestones, errors and
+// the periodic "tunnel alive" line are logged regardless (see internal/vpnlog),
+// so a drop is diagnosable without it; this only adds handshake and
+// retransmit detail.
+func (c *Config) EffectiveVerbose() bool {
+	return c.Verbose != nil && *c.Verbose
+}
+
+// SetVerbose sets the global verbose-logging switch.
+func (c *Config) SetVerbose(on bool) { c.Verbose = &on }
 
 // DefaultIKEProposals mirrors the IKE proposals accepted by the reference
 // strongSwan config at ~/l2tp-proxy/entrypoint.sh: aes256-sha256-modp2048,
@@ -185,6 +207,14 @@ func (c *Config) Profile(name string) (string, *Profile, error) {
 	return name, p, nil
 }
 
+// Label is what to call this profile in the UI: its display name, else its key.
+func (p *Profile) Label(key string) string {
+	if p != nil && p.DisplayName != "" {
+		return p.DisplayName
+	}
+	return key
+}
+
 // Account looks up an account on a profile by name, or the profile's default
 // when name is "".
 func (p *Profile) Account(name string) (string, *Account, error) {
@@ -227,6 +257,9 @@ func (c *Config) AddProfile(name string, p *Profile) (updated bool) {
 		}
 		if p.MTU == 0 {
 			p.MTU = old.MTU
+		}
+		if p.DisplayName == "" {
+			p.DisplayName = old.DisplayName
 		}
 	}
 	if len(p.IKEProposals) == 0 {

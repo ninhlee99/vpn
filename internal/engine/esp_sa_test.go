@@ -2,6 +2,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"vpn/internal/ike"
 	"vpn/internal/ipsec"
@@ -29,5 +30,47 @@ func TestNewESPSAUsesNegotiatedTransform(t *testing.T) {
 	}
 	if _, err := newESPSA(ike.ChildSA{SPI: 1, EncKey: make([]byte, 8), AuthKey: make([]byte, 20), Transform: ike.Transform{Encryption: ike.EncDES, Hash: ike.HashSHA1}}); err == nil {
 		t.Fatal("single DES accepted")
+	}
+}
+
+// The watchdog declares the peer dead when no valid packet has been seen for
+// deadAfter, so an authenticated inbound packet MUST refresh liveness — a
+// missing touch here once meant every healthy tunnel was "dead" after a minute.
+func TestInboundAuthenticatedPacketRefreshesLiveness(t *testing.T) {
+	qm := testQM(0x11, 0x22, time.Hour)
+	sas, err := newSASet(qm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := newLiveness()
+	live.lastRx.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	tr := &espTransport{sas: sas, live: live}
+
+	peerOut, err := newESPSA(qm.Inbound) // what the server encrypts with: same SPI and keys as our inbound SA
+	if err != nil {
+		t.Fatal(err)
+	}
+	udp := append([]byte{0x06, 0xa5, 0x06, 0xa5, 0x00, 0x0a, 0, 0}, 0xAA, 0xBB)
+	pkt, err := peerOut.Encrypt(udp, protoUDP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, ok := tr.process(pkt)
+	if !ok || len(msg) != 2 {
+		t.Fatalf("valid packet not delivered: ok=%v msg=%x", ok, msg)
+	}
+	if live.idle() > time.Second {
+		t.Fatalf("an authenticated packet left the peer looking silent for %s", live.idle())
+	}
+
+	// Junk and 1-byte NAT keepalives are not proof of life.
+	live.lastRx.Store(time.Now().Add(-10 * time.Minute).UnixNano())
+	for _, junk := range [][]byte{{0xFF}, make([]byte, 40), append([]byte{0, 0, 0, 0x99}, make([]byte, 40)...)} {
+		if _, ok := tr.process(junk); ok {
+			t.Fatal("garbage delivered")
+		}
+	}
+	if live.idle() < 9*time.Minute {
+		t.Fatal("unauthenticated packets must not refresh liveness")
 	}
 }

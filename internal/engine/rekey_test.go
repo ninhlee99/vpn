@@ -75,3 +75,45 @@ func TestRekeyDelay(t *testing.T) {
 		t.Fatalf("rekeyDelay(10s) = %s, want the %s floor", got, minRekeyWait)
 	}
 }
+
+func TestRekeyHopeless(t *testing.T) {
+	cases := []struct {
+		name       string
+		failures   int
+		remaining  time.Duration
+		ikeExpired bool
+		want       bool
+	}{
+		{"one failure, plenty of time", 1, 20 * time.Minute, false, false},
+		{"IKE SA past its lifetime and rekey refused", 1, 20 * time.Minute, true, true},
+		{"repeated failures but the SA is far from expiring", 5, 25 * time.Minute, false, false},
+		{"repeated failures and the SA is about to expire", 3, 4 * time.Minute, false, true},
+		{"two failures near expiry: keep trying", 2, 2 * time.Minute, false, false},
+	}
+	for _, c := range cases {
+		if got := rekeyHopeless(c.failures, c.remaining, c.ikeExpired); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A pair the server rekeyed for us must reach the rekey scheduler, or it keeps
+// rekeying on the old pair's clock and collides with the server's next rekey.
+func TestSASetSignalsNewPairAndKeepsItsLifetime(t *testing.T) {
+	sas, err := newSASet(testQM(0x1, 0xA, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-sas.changed // the initial install
+	if err := sas.install(testQM(0x2, 0xB, 20*time.Minute), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sas.changed:
+	default:
+		t.Fatal("installing a pair did not signal the rekey scheduler")
+	}
+	if got := sas.current().lifetime; got != 20*time.Minute {
+		t.Fatalf("current pair lifetime %s, want the new pair's 20m", got)
+	}
+}

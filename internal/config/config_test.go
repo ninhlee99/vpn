@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestAddProfileUpdateKeepsAccounts(t *testing.T) {
 	c := &Config{}
@@ -75,5 +78,54 @@ func TestReAddKeepsProfileMTU(t *testing.T) {
 	c.AddProfile("w", &Profile{Server: "s2"}) // e.g. the UI's edit form, which passes no --mtu
 	if got := c.Profiles["w"].MTU; got != 1280 {
 		t.Fatalf("re-add reset MTU to %d, want 1280 kept", got)
+	}
+}
+
+func TestVerboseDefaultsOffAndPersists(t *testing.T) {
+	c := &Config{Profiles: map[string]*Profile{}}
+	if c.EffectiveVerbose() {
+		t.Fatal("detailed logging must be off unless the user turned it on")
+	}
+	c.SetVerbose(true)
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back Config
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
+	}
+	if !back.EffectiveVerbose() {
+		t.Fatal("an explicit on did not survive a save/load round trip")
+	}
+}
+
+func TestKillSwitchDefaultsOffAndPersists(t *testing.T) {
+	var c Config
+	if c.KillSwitch {
+		t.Fatal("the kill switch blocks the network, so it must be opt-in")
+	}
+	c.KillSwitch = true
+	data, _ := json.Marshal(&c)
+	var back Config
+	if err := json.Unmarshal(data, &back); err != nil || !back.KillSwitch {
+		t.Fatalf("kill switch lost in a save/load round trip: %v %+v", err, back)
+	}
+}
+
+func TestDisplayNameLabelAndSurvivesReAdd(t *testing.T) {
+	p := &Profile{Server: "s"}
+	if got := p.Label("Hinode"); got != "Hinode" {
+		t.Fatalf("no display name: label %q, want the key", got)
+	}
+	c := &Config{Profiles: map[string]*Profile{}}
+	c.AddProfile("Hinode", &Profile{Server: "s", DisplayName: "Office VPN"})
+	if got := c.Profiles["Hinode"].Label("Hinode"); got != "Office VPN" {
+		t.Fatalf("label %q, want the display name", got)
+	}
+	// Editing the server later (profile add again) must not wipe the display name.
+	c.AddProfile("Hinode", &Profile{Server: "s2"})
+	if got := c.Profiles["Hinode"].DisplayName; got != "Office VPN" {
+		t.Fatalf("re-adding the profile lost the display name (%q)", got)
 	}
 }

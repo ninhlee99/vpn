@@ -36,6 +36,14 @@ type State struct {
 	FailDetail  string    `json:"fail_detail,omitempty"`
 	SavedRoutes bool      `json:"saved_routes"` // true once original routing/DNS captured for repair/restore
 
+	// Reconnecting is set (with Phase CONNECTING) while the daemon is
+	// re-establishing a tunnel it lost, on its own — the UI must not treat it
+	// as a failure or start a competing connect. Reconnects counts how many
+	// times this daemon has had to do so; FailDetail then holds the reason
+	// for the most recent drop or failed attempt.
+	Reconnecting bool `json:"reconnecting,omitempty"`
+	Reconnects   int  `json:"reconnects,omitempty"`
+
 	// DNS snapshot, captured before Apply so disconnect/repair can restore
 	// it even if that's a different process invocation than the one that
 	// connected (e.g. after a crash — see dnsmgr.Snapshot). DNSApplied

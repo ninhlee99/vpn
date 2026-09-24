@@ -38,6 +38,8 @@ type Tunnel struct {
 	peerSessionID  uint16
 
 	ns, nr uint16 // our next-to-send / next-expected sequence numbers
+
+	strayData uint64 // data messages dropped for carrying another tunnel/session ID
 }
 
 // Config is what the engine supplies to establish one tunnel+session.
@@ -170,6 +172,21 @@ func (tun *Tunnel) Close() {
 	_ = tun.sendReliableNoReply(ctx, stop)
 }
 
+// PeerIDs are the tunnel and session IDs the LNS assigned to this connection —
+// what it expects in the header of every message we send it.
+func (tun *Tunnel) PeerIDs() (tunnelID, sessionID uint16) {
+	return tun.peerTunnelID, tun.peerSessionID
+}
+
+// SendDataTo sends one PPP frame in an L2TP data message addressed to an
+// arbitrary tunnel/session of the LNS — used to end a session of ours whose
+// Tunnel object no longer exists (see the engine's eviction of a stale
+// session). Data messages carry no sequence numbers, so no control-channel
+// state is needed to send one.
+func SendDataTo(t Transport, peerTunnelID, peerSessionID uint16, pppFrame []byte) error {
+	return t.Send(MarshalData(peerTunnelID, peerSessionID, pppFrame))
+}
+
 // SendData wraps one PPP frame in an L2TP data message (unsequenced, RFC
 // 2661 §5.7.2 — this client relies on ESP + PPP's own LCP/CHAP retries for
 // reliability rather than L2TP data sequencing, matching the reference
@@ -192,6 +209,22 @@ func (tun *Tunnel) RecvData(ctx context.Context) ([]byte, error) {
 			continue
 		}
 		if !msg.Header.IsControl {
+			// Data for another tunnel/session is not ours. The server keeps
+			// sending a stale session's traffic (IP, LCP echo, even a
+			// Terminate-Request) to the newest IPsec SA of this address, so
+			// after a reconnect it arrives here mixed into the new session —
+			// where it would be injected into the tunnel as if it were ours,
+			// or stall PPP negotiation. The IDs in a received header are the
+			// ones this side assigned (RFC 2661 §3.1).
+			if msg.Header.TunnelID != tun.localTunnelID || msg.Header.SessionID != tun.localSessionID {
+				tun.strayData++
+				if tun.strayData == 1 || tun.strayData%500 == 0 {
+					vpnlog.Info(stage, "ignored data for another L2TP session (stale session on the server?)", vpnlog.Fields{
+						"tunnel": msg.Header.TunnelID, "session": msg.Header.SessionID, "dropped_total": tun.strayData,
+					})
+				}
+				continue
+			}
 			return msg.Payload, nil
 		}
 		tun.handleInterleavedControl(msg)

@@ -128,6 +128,12 @@ func espTransformID(t Transform) (int, error) {
 }
 
 func marshalESPTransform(number uint8, t Transform, nextPayload uint8) ([]byte, error) {
+	return marshalESPTransformMode(number, t, encapUDPTransport, nextPayload)
+}
+
+// marshalESPTransformMode is marshalESPTransform with an explicit
+// encapsulation mode: a responder must echo the mode the initiator offered.
+func marshalESPTransformMode(number uint8, t Transform, encapMode uint16, nextPayload uint8) ([]byte, error) {
 	txID, err := espTransformID(t)
 	if err != nil {
 		return nil, err
@@ -138,7 +144,7 @@ func marshalESPTransform(number uint8, t Transform, nextPayload uint8) ([]byte, 
 	}
 	var attrs []byte
 	attrs = append(attrs, encodeAttrTV(ipsecAttrAuthAlgorithm, auth)...)
-	attrs = append(attrs, encodeAttrTV(ipsecAttrEncapsulateMode, encapUDPTransport)...)
+	attrs = append(attrs, encodeAttrTV(ipsecAttrEncapsulateMode, encapMode)...)
 	attrs = append(attrs, encodeAttrTV(ipsecAttrLifeType, lifeTypeSeconds)...)
 	attrs = append(attrs, encodeAttrTV(ipsecAttrLifeDuration, uint16(t.LifeSecs))...)
 	if t.Encryption == EncAES {
@@ -224,11 +230,20 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 	if err != nil || len(txPayloads) != 1 {
 		return chosenESP{}, fmt.Errorf("expected one ESP transform payload: %v", err)
 	}
-	body := txPayloads[0].Body
-	if len(body) < 4 {
-		return chosenESP{}, fmt.Errorf("ESP transform body too short")
+	t, _, err := parseESPTransformBody(txPayloads[0].Body)
+	if err != nil {
+		return chosenESP{}, err
 	}
-	t := Transform{}
+	return chosenESP{SPI: spiVal, Transform: t}, nil
+}
+
+// parseESPTransformBody decodes one ESP Transform payload body: the cipher,
+// its attributes (integrity algorithm, key length, seconds lifetime) and the
+// encapsulation mode it asks for.
+func parseESPTransformBody(body []byte) (t Transform, encapMode uint32, err error) {
+	if len(body) < 4 {
+		return Transform{}, 0, fmt.Errorf("ESP transform body too short")
+	}
 	switch int(body[1]) {
 	case esp3DES:
 		t.Encryption = Enc3DES
@@ -237,7 +252,7 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 	case espAES:
 		t.Encryption = EncAES
 	default:
-		return chosenESP{}, fmt.Errorf("unsupported ESP transform-id %d", body[1])
+		return Transform{}, 0, fmt.Errorf("unsupported ESP transform-id %d", body[1])
 	}
 	data := body[4:]
 	// RFC 2407 §4.5: a Life Duration applies to the Life Type preceding it;
@@ -273,10 +288,12 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 			case authHMACSHA256:
 				t.Hash = HashSHA256
 			default:
-				return chosenESP{}, fmt.Errorf("unsupported ESP authentication algorithm %d", val)
+				return Transform{}, 0, fmt.Errorf("unsupported ESP authentication algorithm %d", val)
 			}
 		case ipsecAttrKeyLength:
 			t.KeyBits = int(val)
+		case ipsecAttrEncapsulateMode:
+			encapMode = val
 		case ipsecAttrLifeType:
 			lifeType = val
 		case ipsecAttrLifeDuration:
@@ -287,12 +304,12 @@ func parseChosenESPSA(saBody []byte) (chosenESP, error) {
 		data = data[consumed:]
 	}
 	if t.Hash == 0 {
-		return chosenESP{}, fmt.Errorf("ESP transform carries no authentication algorithm")
+		return Transform{}, 0, fmt.Errorf("ESP transform carries no authentication algorithm")
 	}
 	if t.Encryption == EncAES && t.KeyBits == 0 {
 		t.KeyBits = 128
 	}
-	return chosenESP{SPI: spiVal, Transform: t}, nil
+	return t, encapMode, nil
 }
 
 // responderLifetimeSecs extracts the seconds lifetime from a

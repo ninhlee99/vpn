@@ -53,3 +53,28 @@ func TestReassertIncludesSplitTunnelHosts(t *testing.T) {
 		t.Fatalf("got %q", cmds)
 	}
 }
+
+// The kill switch swaps the tunnel's /1 routes for blackholes and back in one
+// step; a delete-then-add anywhere in that path would leak traffic.
+func TestBlackholeArgs(t *testing.T) {
+	cases := map[string][]string{
+		"-n change -net 0.0.0.0/1 127.0.0.1 -blackhole":        ipv4BlackholeChangeArgs("0.0.0.0/1"),
+		"-n add -static -net 128.0.0.0/1 127.0.0.1 -blackhole": ipv4BlackholeAddArgs("128.0.0.0/1"),
+		"-n change -net 0.0.0.0/1 -interface utun9":            ipv4OverrideChangeArgs("0.0.0.0/1", "utun9"),
+	}
+	for want, got := range cases {
+		if strings.Join(got, " ") != want {
+			t.Errorf("got %q want %q", strings.Join(got, " "), want)
+		}
+	}
+}
+
+func TestRestoreKeepingBlackholeSkipsOverrides(t *testing.T) {
+	// Nothing to remove and nothing installed: it must not touch the /1 halves,
+	// and must not fail — exercised without root because every removal is
+	// conditional on state this snapshot never acquired.
+	s := &Snapshot{overrideAdded: true}
+	if err := s.RestoreKeepingBlackhole(); err != nil {
+		t.Fatal(err)
+	}
+}

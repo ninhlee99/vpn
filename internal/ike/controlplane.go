@@ -23,6 +23,13 @@ type Events struct {
 	// DeleteIKE reports the peer deleted this IKE SA: no further Quick Mode
 	// (and so no rekey) is possible on it.
 	DeleteIKE func()
+
+	// ESPProposals and NewChildSA together enable answering a rekey the peer
+	// starts itself (see responder_qm.go): ESPProposals are the transforms we
+	// accept, NewChildSA receives the finished SA pair, which should become the
+	// one outbound traffic uses. Leave them unset to ignore such rekeys.
+	ESPProposals []string
+	NewChildSA   func(*QuickModeResult)
 }
 
 // dataPlane is the state StartDataPhase adds to a Session.
@@ -35,12 +42,43 @@ type dataPlane struct {
 
 	pendingMu sync.Mutex
 	pending   map[uint32]chan []byte // Quick Mode replies we are waiting for, by message ID
+
+	respMu sync.Mutex
+	resp   map[uint32]*respQM // server-initiated Quick Modes we have answered, by message ID
 }
 
-// recvIdleTimeout keeps RecvESP's historical contract: with no deadline on
-// the caller's context, 30s without a single packet from the server is an
-// error (the LNS keeps the link alive with LCP echoes well inside that).
-const recvIdleTimeout = 30 * time.Second
+// maxReadErrors is how many consecutive socket read errors (spaced
+// readErrorBackoff apart) the reader tolerates before giving up: a network
+// change or wake from sleep can fail reads for a moment, and one such blip
+// must not end a session that the liveness watchdog would have judged.
+const (
+	maxReadErrors    = 50
+	readErrorBackoff = 200 * time.Millisecond
+)
+
+// natKeepalive is RFC 3948 §2.3's NAT keepalive: one 0xFF byte in a UDP
+// datagram, silently discarded by the receiver.
+var natKeepalive = []byte{0xFF}
+
+// Age is how long ago this IKE SA was established.
+func (s *Session) Age() time.Duration { return time.Since(s.EstablishedAt) }
+
+// IKELifetime is the lifetime the responder chose for this IKE SA (0 if it
+// announced none).
+func (s *Session) IKELifetime() time.Duration { return s.Lifetime }
+
+// SendNATKeepalive refreshes the NAT mapping for the floated UDP/4500 flow
+// (RFC 3948 §2.3). Home/office NATs commonly forget an idle UDP mapping
+// within 30–120s, after which the server's packets are dropped at the
+// router while everything on this side still looks connected. A no-op when
+// no NAT was detected (not floated).
+func (s *Session) SendNATKeepalive() error {
+	if !s.floated {
+		return nil
+	}
+	_, err := s.conn.WriteToUDP(natKeepalive, s.destAddr)
+	return err
+}
 
 // StartDataPhase hands the socket to a single reader goroutine for the rest
 // of the session. Until now each exchange read the socket itself, which
@@ -56,6 +94,7 @@ func (s *Session) StartDataPhase(ctx context.Context, events Events) {
 		done:    make(chan struct{}),
 		events:  events,
 		pending: map[uint32]chan []byte{},
+		resp:    map[uint32]*respQM{},
 	}
 	s.dp = dp
 	go s.readLoop(ctx, dp)
@@ -64,22 +103,39 @@ func (s *Session) StartDataPhase(ctx context.Context, events Events) {
 func (s *Session) readLoop(ctx context.Context, dp *dataPlane) {
 	defer close(dp.done)
 	buf := make([]byte, 65535)
+	readErrors := 0
+	// Block in the read instead of waking every second to check ctx: an idle
+	// tunnel then costs no CPU wakeups at all. Cancelling ctx expires the
+	// read deadline, which is what unblocks the read below. Clear any
+	// deadline the negotiation phases left on the socket first.
+	_ = s.conn.SetReadDeadline(time.Time{})
+	stop := context.AfterFunc(ctx, func() { _ = s.conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	for {
 		if ctx.Err() != nil {
 			dp.setErr(ctx.Err())
 			return
 		}
-		// A short deadline only so ctx cancellation is noticed promptly.
-		_ = s.conn.SetReadDeadline(time.Now().Add(time.Second))
 		n, from, err := s.conn.ReadFromUDP(buf)
 		if err != nil {
 			var ne net.Error
 			if errors.As(err, &ne) && ne.Timeout() {
-				continue
+				readErrors = 0
+				continue // only ctx cancellation expires the deadline; the check above ends the loop
 			}
-			dp.setErr(err)
-			return
+			readErrors++
+			if errors.Is(err, net.ErrClosed) || readErrors > maxReadErrors {
+				dp.setErr(err)
+				return
+			}
+			vpnlog.Error(stage, "IKE/ESP socket read failed — retrying", vpnlog.Fields{"err": err, "consecutive": readErrors})
+			select {
+			case <-time.After(readErrorBackoff):
+			case <-ctx.Done():
+			}
+			continue
 		}
+		readErrors = 0
 		if !from.IP.Equal(s.serverIP) {
 			continue
 		}
@@ -137,7 +193,7 @@ func (s *Session) dispatchIKE(msg []byte) {
 		ch := s.dp.pending[h.MessageID]
 		s.dp.pendingMu.Unlock()
 		if ch == nil {
-			vpnlog.Error(stage, "server-initiated Quick Mode (its own rekey) — not supported; relying on client-initiated rekey", vpnlog.Fields{"msg_id": h.MessageID})
+			s.handleQuickMode(h, msg[headerLen:])
 			return
 		}
 		select {
@@ -305,21 +361,18 @@ func (s *Session) RekeyQuickMode(espProposals []string, localIP, remoteIP net.IP
 	return s.quickMode(espProposals, localIP, remoteIP, s.controlRoundTrip, s.sendRaw)
 }
 
-// recvESPDataPhase is RecvESP once the reader owns the socket.
+// recvESPDataPhase is RecvESP once the reader owns the socket. It waits for
+// as long as ctx allows: silence from the server is not an error here. An
+// idle tunnel legitimately receives nothing for long stretches, and this
+// used to fail after 30s of it — which tore down a healthy session. Whether
+// the peer is really gone is the engine's liveness watchdog's call (it
+// probes with LCP echoes), not something a blocked read can tell.
 func (s *Session) recvESPDataPhase(ctx context.Context) ([]byte, error) {
-	var idle <-chan time.Time
-	if _, ok := ctx.Deadline(); !ok {
-		t := time.NewTimer(recvIdleTimeout)
-		defer t.Stop()
-		idle = t.C
-	}
 	select {
 	case pkt := <-s.dp.espIn:
 		return pkt, nil
 	case <-s.dp.done:
 		return nil, fmt.Errorf("IKE/ESP socket reader stopped: %w", s.dp.getErr())
-	case <-idle:
-		return nil, fmt.Errorf("no packet from the server for %s", recvIdleTimeout)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
