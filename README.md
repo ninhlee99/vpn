@@ -18,10 +18,9 @@ VPN client L2TP/IPsec thuần macOS — không phụ thuộc strongSwan, xl2tpd,
 ## Cài đặt
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-arm64.sh | bash   # Apple Silicon (M1/M2/M3...)
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-intel.sh | bash   # Mac Intel
 ```
-
-Script tự nhận diện kiến trúc máy; muốn chỉ định thẳng dùng `install-arm64.sh` (Apple Silicon) hoặc `install-intel.sh` (cùng đường dẫn trên).
 
 Installer cài CLI vào `/usr/local/bin/vpn` (setuid-root, xem [Bảo mật](#bảo-mật)) và app vào `/Applications/TMS VPN.app`, sau khi đối chiếu `SHA256SUMS` của release.
 
@@ -197,7 +196,7 @@ bun install && bun run dev                          # prototype giao diện — 
 Release được tạo khi push tag semver, sau khi CI pass:
 
 ```bash
-git tag v1.2.3 && git push origin v1.2.3
+git tag v0.4.3 && git push origin v0.4.3   # bản mới nhất hiện tại: v0.4.2
 ```
 
 Mỗi release gồm `vpn-darwin-arm64`, `vpn-darwin-amd64`, `TMS-VPN.app.zip`, `SHA256SUMS` và `SHA256SUMS.sig` (chữ ký ed25519). `vpn update` từ chối release nếu chữ ký hoặc SHA-256 không khớp, hoặc version không mới hơn bản đang chạy (`--force` để bỏ qua).
