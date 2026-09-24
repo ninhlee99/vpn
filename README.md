@@ -60,12 +60,12 @@ Biểu tượng TMS VPN sẽ xuất hiện trên menu bar.
 
 ### Cách 1: qua app (khuyến nghị)
 
-1. Bấm biểu tượng **TMS VPN** trên menu bar, chọn **Thêm**.
-2. Nhập **Tên điểm nối** (tuỳ đặt), **Địa chỉ máy chủ**, **Tài khoản**, **Mật khẩu**, **PSK**.
-3. Giữ bật **Gửi toàn bộ lưu lượng qua VPN** nếu muốn mọi traffic đi qua VPN (xem [Full tunnel và split tunnel](#full-tunnel-và-split-tunnel)).
-4. Bật **công tắc** bên phải hồ sơ để kết nối (tắt công tắc để ngắt). Khi thành công, app hiện **ĐANG HOẠT ĐỘNG** kèm IP được cấp.
+1. Bấm biểu tượng **TMS VPN** trên menu bar, chọn **Add**.
+2. Nhập **Display name** (tuỳ đặt), **Server address**, **Account name**, **Password**, **Shared secret** (tức PSK), rồi bấm **Create**.
+3. Giữ bật **Send all traffic over VPN** nếu muốn mọi traffic đi qua VPN (xem [Full tunnel và split tunnel](#full-tunnel-và-split-tunnel)).
+4. Bật **công tắc** bên phải hồ sơ để kết nối (tắt công tắc để ngắt). Khi thành công, app hiện **ACTIVE** kèm IP được cấp.
 
-Muốn sửa hoặc xoá hồ sơ, mở menu bên cạnh công tắc rồi chọn **Chỉnh sửa** hoặc **Xóa hồ sơ**.
+Muốn sửa hoặc xoá hồ sơ, mở menu bên cạnh công tắc rồi chọn **Edit** hoặc **Delete**.
 
 PSK và mật khẩu được lưu trong **Keychain** của macOS, không nằm trong file cấu hình.
 
@@ -219,7 +219,7 @@ Binary tự hạ quyền về user thường ngay khi khởi động, và chỉ 
 ### Yêu cầu
 
 - Go theo `go.mod` (hiện là 1.27): `brew install go`.
-- App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ.
+- App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ. Không có toolchain phù hợp thì tải bản app CI build sẵn cho mỗi PR: tab **Checks** của PR → workflow `test` → artifact **TMS-VPN-app**.
 - Prototype (tuỳ chọn): [bun](https://bun.sh).
 
 ### Build và cài bản local
