@@ -10,13 +10,7 @@ import {
   X
 } from 'lucide-react';
 import { VPNProfile, ConnectionState, AppSettings } from '../types';
-import { TracingBorder } from './TracingBorder';
 
-// One lap of the tracing border, in seconds, and its tail as a fraction of the
-// perimeter — identical while connecting and once connected, as in main.swift's
-// StatusBorder.
-const COMET_PERIOD = 1.8;
-const COMET_TAIL = 0.35;
 
 export type PopoverViewMode = 'list' | 'add' | 'edit';
 
@@ -460,12 +454,6 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                     : 'border-[#196b7d]/70 bg-[#0a2530] shadow-[0_0_16px_rgba(20,184,210,0.35)]'
                 }`}
               >
-                {(connectionState === 'connecting' || connectionState === 'reconnecting') && (
-                  <TracingBorder tone="amber" radius={14} period={COMET_PERIOD} strokeWidth={2} tail={COMET_TAIL} />
-                )}
-                {connectionState === 'connected' && (
-                  <TracingBorder tone="green" radius={14} period={COMET_PERIOD} strokeWidth={2} tail={COMET_TAIL} />
-                )}
                 <div className="relative z-10 flex items-center justify-center">
                   <Shield
                     className={`w-5 h-5 stroke-[2.2] transition-colors duration-300 ${
@@ -559,17 +547,6 @@ export const TMSVPNPopover: React.FC<TMSVPNPopoverProps> = ({
                       : 'bg-[#181f2b]/70 border-white/[0.08] hover:border-white/20 hover:bg-[#181f2b]'
                   }`}
                 >
-                  {/* Light tracing the border: amber while connecting, red while reconnecting, green once connected — same motion in every state */}
-                  {(isConnected || isConnecting || isReconnecting) && (
-                    <TracingBorder
-                      key={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
-                      tone={isReconnecting ? 'red' : isConnecting ? 'amber' : 'green'}
-                      radius={14}
-                      period={COMET_PERIOD}
-                      tail={COMET_TAIL}
-                    />
-                  )}
-
                   {/* Card Inner Content */}
                   <div className="relative z-10 flex items-center justify-between px-4 py-3.5">
                     {/* Left Info */}
