@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,8 +34,11 @@ const maxSize = 8 << 20 // 8 MiB
 // emptied in place and a marker line records that.
 const sessionCap = 16 << 20 // 16 MiB
 
-var logger *log.Logger
-var verbose bool
+// logger and verbose are read from every goroutine of a connection (the data
+// plane, watchdog, rekey, IKE reader ...) while Init may run again on a
+// reconnect, so they are atomics rather than plain globals.
+var logger atomic.Pointer[log.Logger]
+var verbose atomic.Bool
 var logFile *os.File
 
 // redactedKeys never get their value written, even if a caller passes them
@@ -47,7 +51,7 @@ var redactedKeys = map[string]bool{
 // Init opens (creating if needed) the log file at 0600 and enables verbose
 // (debug-level) output when v is true.
 func Init(v bool) error {
-	verbose = v
+	verbose.Store(v)
 	if err := os.MkdirAll(filepath.Dir(Path), 0o755); err != nil {
 		return err
 	}
@@ -63,10 +67,10 @@ func Init(v bool) error {
 	}
 	logFile = f
 	var w io.Writer = &capWriter{f: f, limit: sessionCap}
-	if verbose {
+	if v {
 		w = io.MultiWriter(w, os.Stderr)
 	}
-	logger = log.New(w, "", log.LstdFlags)
+	logger.Store(log.New(w, "", log.LstdFlags))
 	return nil
 }
 
@@ -98,10 +102,13 @@ func rotate(path, rotated string, limit int64) {
 	}
 }
 
-func ensure() {
-	if logger == nil {
-		logger = log.New(os.Stderr, "", log.LstdFlags)
+// current returns the logger, falling back to stderr when Init never ran.
+func current() *log.Logger {
+	if l := logger.Load(); l != nil {
+		return l
 	}
+	logger.CompareAndSwap(nil, log.New(os.Stderr, "", log.LstdFlags))
+	return logger.Load()
 }
 
 // Fields is a structured log payload; values under a redacted key are
@@ -132,23 +139,22 @@ func (f Fields) String() string {
 // leaves nothing to diagnose it from. Only per-packet detail (Debug) is
 // gated on verbose. Silent until Init, so non-connect commands print nothing.
 func Info(stage, msg string, f Fields) {
-	if logger == nil {
+	l := logger.Load()
+	if l == nil {
 		return // no Init: a plain CLI command (diagnose, probe), not a connect — stay quiet as before
 	}
-	logger.Printf("[%s] %s%s", stage, msg, f.String())
+	l.Printf("[%s] %s%s", stage, msg, f.String())
 }
 
 func Error(stage, msg string, f Fields) {
-	ensure()
-	logger.Printf("[%s] ERROR %s%s", stage, msg, f.String())
+	current().Printf("[%s] ERROR %s%s", stage, msg, f.String())
 }
 
 func Debug(stage, msg string, f Fields) {
-	if !verbose {
+	if !verbose.Load() {
 		return
 	}
-	ensure()
-	logger.Printf("[%s] debug %s%s", stage, msg, f.String())
+	current().Printf("[%s] debug %s%s", stage, msg, f.String())
 }
 
 // Timed logs how long a named step took — useful for spotting retransmit

@@ -62,7 +62,16 @@ type Session struct {
 	mm1Retransmits int        // >0: MM1's retransmit budget, shortened when a fallback port follows
 	closeOnce      sync.Once
 	floated        bool // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
+	floatAnyPort   bool // may float to an ephemeral local port when 4500 is taken (a second IKE SA alongside a live one)
 }
+
+// NAT-T ports (RFC 3947): the server's is fixed at 4500 and ours is 4500 too
+// unless that is taken. Variables only so tests can run a fake server on
+// loopback next to the client.
+var (
+	natTServerPort = 4500
+	natTLocalPort  = 4500
+)
 
 // nonESPMarker is RFC 3947 §3's 4 zero bytes prepended to every IKE (not
 // ESP) message once negotiation has floated to UDP/4500 — required so the
@@ -72,6 +81,14 @@ var nonESPMarker = []byte{0, 0, 0, 0}
 
 // Config is everything needed to run Phase 1 against one server.
 type Config struct {
+	// Reauth marks this Phase 1 as a second IKE SA built while an earlier one
+	// is still carrying traffic (see the engine's re-authentication): it may
+	// then float to an ephemeral local port instead of failing on a taken 4500.
+	Reauth bool
+	// LocalPorts overrides the local ports tried for the pre-NAT-T exchange
+	// (default 500 then any free port). Port 500 needs root; an unprivileged
+	// run passes {0}.
+	LocalPorts []int
 	ServerHost string
 	ServerID   string // expected IDr; empty means accept any (matches entrypoint.sh's rightid=%any)
 	PSK        string
@@ -118,8 +135,12 @@ func establishPhase1To(ctx context.Context, cfg Config, serverPort int) (*Sessio
 	// picture and something reshuffles the route table. Pinning to a
 	// specific local address removes that ambiguity.
 	var lastErr error
-	for i, port := range phase1LocalPorts {
-		last := i+1 == len(phase1LocalPorts)
+	ports := phase1LocalPorts
+	if len(cfg.LocalPorts) > 0 {
+		ports = cfg.LocalPorts
+	}
+	for i, port := range ports {
+		last := i+1 == len(ports)
 		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: cfg.LocalIP, Port: port})
 		if err != nil {
 			lastErr = fmt.Errorf("bind local UDP/%d on %s (needs root, or another IKE client is already using it): %w", port, cfg.LocalIP, err)
@@ -129,7 +150,7 @@ func establishPhase1To(ctx context.Context, cfg Config, serverPort int) (*Sessio
 			}
 			return nil, lastErr
 		}
-		sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP}
+		sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP, floatAnyPort: cfg.Reauth}
 		if !last {
 			// Leave time for the fallback inside the caller's connect timeout.
 			sess.mm1Retransmits = firstPortMM1Retransmits
@@ -226,7 +247,7 @@ func (s *Session) exchangeN(ctx context.Context, msg []byte, expectMinLen, retra
 				continue // stray packet from something else on this port
 			}
 			got := buf[:n]
-			floatedMsg := from.Port == 4500
+			floatedMsg := from.Port == natTServerPort
 			if floatedMsg {
 				if n < 4 || !bytes.Equal(got[:4], nonESPMarker) {
 					vpnlog.Debug(stage, "dropped :4500 packet missing non-ESP marker", vpnlog.Fields{"bytes": n})
@@ -360,7 +381,7 @@ func (s *Session) exchangeQuickMode(msg []byte, msgID uint32) ([]byte, error) {
 				continue
 			}
 			got := buf[:n]
-			if from.Port == 4500 {
+			if from.Port == natTServerPort {
 				if n < 4 || !bytes.Equal(got[:4], nonESPMarker) {
 					continue
 				}
@@ -687,13 +708,20 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 // floatToNATT replaces the pre-negotiation UDP/500 socket with UDP/4500.
 // Bind first so failure leaves the established Phase 1 socket intact.
 func (s *Session) floatToNATT(localIP net.IP) error {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: 4500})
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: natTLocalPort})
+	if err != nil && s.floatAnyPort && isAddrInUse(err) {
+		// A second IKE SA built while the first is still live (re-authentication)
+		// cannot share local UDP/4500 with it. NAT-T only fixes the *server's*
+		// port; any local source port works, the server just answers to whatever
+		// it saw.
+		conn, err = net.ListenUDP("udp4", &net.UDPAddr{IP: localIP, Port: 0})
+	}
 	if err != nil {
-		return fmt.Errorf("bind local UDP/4500 for NAT-T on %s: %w", localIP, err)
+		return fmt.Errorf("bind local UDP/%d for NAT-T on %s: %w", natTLocalPort, localIP, err)
 	}
 	oldConn := s.conn
 	s.conn = conn
-	s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: 4500}
+	s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: natTServerPort}
 	s.floated = true
 	if err := oldConn.Close(); err != nil {
 		conn.Close()
@@ -702,7 +730,7 @@ func (s *Session) floatToNATT(localIP net.IP) error {
 		s.floated = false
 		return fmt.Errorf("close pre-NAT-T UDP/500 socket: %w", err)
 	}
-	vpnlog.Info(stage, "floated to UDP/4500 for NAT-T", vpnlog.Fields{"local_port": 4500})
+	vpnlog.Info(stage, "floated to UDP/4500 for NAT-T", vpnlog.Fields{"local_port": conn.LocalAddr().(*net.UDPAddr).Port})
 	return nil
 }
 

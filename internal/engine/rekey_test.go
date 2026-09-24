@@ -96,3 +96,24 @@ func TestRekeyHopeless(t *testing.T) {
 		}
 	}
 }
+
+// A pair the server rekeyed for us must reach the rekey scheduler, or it keeps
+// rekeying on the old pair's clock and collides with the server's next rekey.
+func TestSASetSignalsNewPairAndKeepsItsLifetime(t *testing.T) {
+	sas, err := newSASet(testQM(0x1, 0xA, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-sas.changed // the initial install
+	if err := sas.install(testQM(0x2, 0xB, 20*time.Minute), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-sas.changed:
+	default:
+		t.Fatal("installing a pair did not signal the rekey scheduler")
+	}
+	if got := sas.current().lifetime; got != 20*time.Minute {
+		t.Fatalf("current pair lifetime %s, want the new pair's 20m", got)
+	}
+}

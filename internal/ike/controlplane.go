@@ -23,6 +23,13 @@ type Events struct {
 	// DeleteIKE reports the peer deleted this IKE SA: no further Quick Mode
 	// (and so no rekey) is possible on it.
 	DeleteIKE func()
+
+	// ESPProposals and NewChildSA together enable answering a rekey the peer
+	// starts itself (see responder_qm.go): ESPProposals are the transforms we
+	// accept, NewChildSA receives the finished SA pair, which should become the
+	// one outbound traffic uses. Leave them unset to ignore such rekeys.
+	ESPProposals []string
+	NewChildSA   func(*QuickModeResult)
 }
 
 // dataPlane is the state StartDataPhase adds to a Session.
@@ -35,6 +42,9 @@ type dataPlane struct {
 
 	pendingMu sync.Mutex
 	pending   map[uint32]chan []byte // Quick Mode replies we are waiting for, by message ID
+
+	respMu sync.Mutex
+	resp   map[uint32]*respQM // server-initiated Quick Modes we have answered, by message ID
 }
 
 // maxReadErrors is how many consecutive socket read errors (spaced
@@ -49,6 +59,13 @@ const (
 // natKeepalive is RFC 3948 §2.3's NAT keepalive: one 0xFF byte in a UDP
 // datagram, silently discarded by the receiver.
 var natKeepalive = []byte{0xFF}
+
+// Age is how long ago this IKE SA was established.
+func (s *Session) Age() time.Duration { return time.Since(s.EstablishedAt) }
+
+// IKELifetime is the lifetime the responder chose for this IKE SA (0 if it
+// announced none).
+func (s *Session) IKELifetime() time.Duration { return s.Lifetime }
 
 // SendNATKeepalive refreshes the NAT mapping for the floated UDP/4500 flow
 // (RFC 3948 §2.3). Home/office NATs commonly forget an idle UDP mapping
@@ -77,6 +94,7 @@ func (s *Session) StartDataPhase(ctx context.Context, events Events) {
 		done:    make(chan struct{}),
 		events:  events,
 		pending: map[uint32]chan []byte{},
+		resp:    map[uint32]*respQM{},
 	}
 	s.dp = dp
 	go s.readLoop(ctx, dp)
@@ -175,7 +193,7 @@ func (s *Session) dispatchIKE(msg []byte) {
 		ch := s.dp.pending[h.MessageID]
 		s.dp.pendingMu.Unlock()
 		if ch == nil {
-			vpnlog.Error(stage, "server-initiated Quick Mode (its own rekey) — not supported; relying on client-initiated rekey", vpnlog.Fields{"msg_id": h.MessageID})
+			s.handleQuickMode(h, msg[headerLen:])
 			return
 		}
 		select {

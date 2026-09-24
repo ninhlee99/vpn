@@ -219,9 +219,10 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 	var ipcp ppp.NegotiatedIPCP
 	var lcpMagic uint32                                          // ours, for answering and sending LCP Echo-Requests (PPP result)
 	var startRekey func(ctx context.Context, giveUp func(error)) // set once Quick Mode succeeds
-	var ikeSess *ike.Session                                     // set once Phase 1 succeeds
-	var sas *saSet                                               // set once Quick Mode succeeds
-	var localIPOfSession net.IP                                  // our outbound address for this attempt
+	var ikeSess *ike.Session                                     // the first IKE SA, set once Phase 1 succeeds
+	var startReauth func(ctx context.Context, giveUp func(error))
+	var sas *saSet              // set once Quick Mode succeeds
+	var localIPOfSession net.IP // our outbound address for this attempt
 	live := newLiveness()
 
 	// Kill switch: while reconnecting a full tunnel, routes are not restored
@@ -245,6 +246,10 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 	// until Connect returns, on every path.
 	ikeCtx, stopIKE := context.WithCancel(sigCtx)
 	defer stopIKE()
+
+	// Every IKE SA carrying ESP (one, or two during a re-authentication).
+	mux := newIKESessions(ikeCtx)
+	defer mux.closeAll()
 
 	// Registered after stopIKE so it runs first, on every return path —
 	// including each failure between Phase 1 and a working tunnel — and
@@ -370,23 +375,77 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		}
 		// From here on one goroutine owns the socket and demultiplexes ESP
 		// from IKE — required for rekeying while traffic flows.
-		sess.StartDataPhase(ikeCtx, ike.Events{
+		events := ike.Events{
 			DeleteESP: func(spis []uint32) {
 				if sas.drop(spis) {
 					vpnlog.Error("ENGINE", "server deleted the ESP SA currently in use — rekeying immediately", nil)
 				}
 			},
-			// Only logged by the reader itself: ESP normally keeps flowing
-			// until its own lifetime ends, and the watchdog reconnects the
-			// moment it stops. Reconnecting here would drop a working tunnel.
-		})
+			// DeleteIKE is only logged by the reader itself: ESP normally keeps
+			// flowing until its own lifetime ends, and the watchdog reconnects
+			// the moment it stops. Reconnecting here would drop a working tunnel.
+
+			// A rekey the server starts itself: answer it, and send from the
+			// new pair once it exists (the old one stays valid for inbound).
+			ESPProposals: cfg.ESPProposals,
+			NewChildSA: func(qm *ike.QuickModeResult) {
+				if err := sas.install(qm, time.Now()); err != nil {
+					vpnlog.Error("ENGINE", "could not install the SA pair from a server-initiated rekey", vpnlog.Fields{"err": err})
+					return
+				}
+				vpnlog.Info("ENGINE", "ESP SA rekeyed by the server", vpnlog.Fields{
+					"in_spi": fmt.Sprintf("%08x", qm.Inbound.SPI), "out_spi": fmt.Sprintf("%08x", qm.Outbound.SPI), "lifetime_s": int(qm.Lifetime / time.Second),
+				})
+			},
+		}
+		sess.StartDataPhase(ikeCtx, events)
+		mux.add(sess)
 		startRekey = func(ctx context.Context, giveUp func(error)) {
-			go runRekey(ctx, sas, sess, func() (*ike.QuickModeResult, error) {
-				return sess.RekeyQuickMode(cfg.ESPProposals, localIP, serverIP)
+			// Rekeys always go over the newest IKE SA (mux.current), which
+			// changes when a re-authentication swaps it.
+			go runRekey(ctx, sas, func() ikeSession { return mux.current() }, func() (*ike.QuickModeResult, error) {
+				return mux.current().RekeyQuickMode(cfg.ESPProposals, localIP, serverIP)
 			}, qm.Lifetime, cfg.RekeyAfter, giveUp)
 		}
+		// Re-authentication: build a fresh IKE SA (and its Quick Mode) next to
+		// the live one before the old one's lifetime runs out, then move over.
+		startReauth = func(ctx context.Context, giveUp func(error)) {
+			establish := func(ectx context.Context) (ikeSession, *ike.QuickModeResult, error) {
+				var next *ike.Session
+				var nqm *ike.QuickModeResult
+				// Binding the IKE ports needs root, like the first Phase 1.
+				err := privilege.Elevate(func() error {
+					tctx, cancel := context.WithTimeout(ectx, cfg.Timeout)
+					defer cancel()
+					s2, err := ike.EstablishPhase1(tctx, ike.Config{
+						ServerHost: serverIP.String(),
+						ServerID:   cfg.ServerID,
+						PSK:        cfg.PSK,
+						Proposals:  cfg.IKEProposals,
+						LocalIP:    localIP,
+						Reauth:     true,
+					})
+					if err != nil {
+						return fmt.Errorf("IKE Phase 1: %w", err)
+					}
+					q, err := s2.EstablishQuickMode(cfg.ESPProposals, localIP, serverIP)
+					if err != nil {
+						s2.Close()
+						return fmt.Errorf("Quick Mode: %w", err)
+					}
+					s2.StartDataPhase(ikeCtx, events)
+					next, nqm = s2, q
+					return nil
+				})
+				if err != nil {
+					return nil, nil, err
+				}
+				return next, nqm, nil
+			}
+			go runReauth(ctx, mux, sas, establish, giveUp)
+		}
 		espT := &espTransport{
-			sess: sess,
+			mux:  mux,
 			sas:  sas,
 			live: live,
 			repairRoute: func() error {
@@ -526,7 +585,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		return setupErr
 	}
 	vpnlog.Info("ENGINE", "VPN connected", vpnlog.Fields{"local_ip": ipcp.LocalIP.String(), "device": dev.Name, "mtu": cfg.MTU, "full_tunnel": cfg.FullTunnel, "reconnects": reconnects,
-		"ike_lifetime_s": int(ikeSess.Lifetime / time.Second), "esp_lifetime_s": int(sas.current().expires.Sub(connectedAt) / time.Second)})
+		"ike_lifetime_s": int(mux.current().IKELifetime() / time.Second), "esp_lifetime_s": int(sas.current().expires.Sub(connectedAt) / time.Second)})
 
 	// Everything that only makes sense while the tunnel is up stops together
 	// when it is lost, and *before* teardown: a route watcher or rekey still
@@ -554,7 +613,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		echoID++
 		id := echoID
 		echoMu.Unlock()
-		if err := ikeSess.SendNATKeepalive(); err != nil {
+		if err := mux.keepalive(); err != nil {
 			vpnlog.Error("ENGINE", "NAT keepalive send failed", vpnlog.Fields{"err": err})
 		}
 		// The request carries OUR negotiated Magic-Number (0 if the peer rejected
@@ -574,6 +633,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		}
 	}
 	startRekey(dpCtx, drop)
+	startReauth(dpCtx, drop)
 	go func() {
 		report := func(idle time.Duration) {
 			cur := sas.current()
@@ -581,7 +641,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				"rx_packets": live.rx.Load(), "tx_packets": live.tx.Load(),
 				"idle_s":        int(idle / time.Second),
 				"esp_sa_left_s": int(time.Until(cur.expires) / time.Second),
-				"ike_age_s":     int(time.Since(ikeSess.EstablishedAt) / time.Second),
+				"ike_age_s":     int(mux.current().Age() / time.Second),
 				"uptime_s":      int(time.Since(connectedAt) / time.Second),
 			})
 		}

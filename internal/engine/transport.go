@@ -8,21 +8,20 @@ import (
 	"sync/atomic"
 	"syscall"
 
-	"vpn/internal/ike"
 	"vpn/internal/l2tp"
 	"vpn/internal/ppp"
 	"vpn/internal/vpnlog"
 )
 
 // espTransport implements l2tp.Transport over an ESP SA pair carried inside
-// the IKE session's already-floated NAT-T socket. It reconstructs the inner
+// the IKE session's already-floated NAT-T socket (see ikeSessions). It reconstructs the inner
 // UDP/1701 header ESP transport mode protects (RFC 4303 §3.1: the payload
 // ESP encrypts is the original packet's next header onward — here, a UDP
 // header plus the L2TP message) since this client never builds real IP
 // packets for its own control/data traffic, only the payload IPsec expects.
 type espTransport struct {
-	sess        *ike.Session
-	sas         *saSet // current pair for sending; every live pair for receiving (see rekey.go)
+	mux         *ikeSessions // the IKE SA(s) whose socket carries the ESP
+	sas         *saSet       // current pair for sending; every live pair for receiving (see rekey.go)
 	repairRoute func() error
 	live        *liveness // nil in tests; otherwise fed by every valid inbound packet
 	drops       atomic.Uint64
@@ -65,7 +64,7 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	if t.live != nil {
 		t.live.tx.Add(1)
 	}
-	return sendWithRouteRetry(func() error { return t.sess.SendESP(pkt) }, t.repairRoute)
+	return sendWithRouteRetry(func() error { return t.mux.sendESP(pkt) }, t.repairRoute)
 }
 
 // sendWithRouteRetry repairs a route lost by macOS's route reconciler and
@@ -84,7 +83,7 @@ func sendWithRouteRetry(send func() error, repairRoute func() error) error {
 
 func (t *espTransport) Recv(ctx context.Context) ([]byte, error) {
 	for {
-		pkt, err := t.sess.RecvESP(ctx)
+		pkt, err := t.mux.recv(ctx)
 		if err != nil {
 			return nil, err
 		}

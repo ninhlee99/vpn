@@ -38,6 +38,8 @@ type Tunnel struct {
 	peerSessionID  uint16
 
 	ns, nr uint16 // our next-to-send / next-expected sequence numbers
+
+	strayData uint64 // data messages dropped for carrying another tunnel/session ID
 }
 
 // Config is what the engine supplies to establish one tunnel+session.
@@ -192,6 +194,22 @@ func (tun *Tunnel) RecvData(ctx context.Context) ([]byte, error) {
 			continue
 		}
 		if !msg.Header.IsControl {
+			// Data for another tunnel/session is not ours. The server keeps
+			// sending a stale session's traffic (IP, LCP echo, even a
+			// Terminate-Request) to the newest IPsec SA of this address, so
+			// after a reconnect it arrives here mixed into the new session —
+			// where it would be injected into the tunnel as if it were ours,
+			// or stall PPP negotiation. The IDs in a received header are the
+			// ones this side assigned (RFC 2661 §3.1).
+			if msg.Header.TunnelID != tun.localTunnelID || msg.Header.SessionID != tun.localSessionID {
+				tun.strayData++
+				if tun.strayData == 1 || tun.strayData%500 == 0 {
+					vpnlog.Info(stage, "ignored data for another L2TP session (stale session on the server?)", vpnlog.Fields{
+						"tunnel": msg.Header.TunnelID, "session": msg.Header.SessionID, "dropped_total": tun.strayData,
+					})
+				}
+				continue
+			}
 			return msg.Payload, nil
 		}
 		tun.handleInterleavedControl(msg)
