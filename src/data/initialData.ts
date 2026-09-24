@@ -3,7 +3,7 @@ import { VPNProfile, AppSettings } from '../types';
 export const INITIAL_PROFILES: VPNProfile[] = [
   {
     id: 'prod-hq',
-    name: 'Trụ sở chính (Prod)',
+    name: 'Head Office (Prod)',
     serverAddress: 'vpn-prod.company.internal',
     username: 'admin@company.vn',
     password: '••••••••••••',
@@ -15,7 +15,7 @@ export const INITIAL_PROFILES: VPNProfile[] = [
   },
   {
     id: 'dev-staging',
-    name: 'Môi trường Dev & Staging',
+    name: 'Dev & Staging',
     serverAddress: 'vpn-staging.company.internal',
     username: 'developer@company.vn',
     password: '••••••••••••',
@@ -27,7 +27,7 @@ export const INITIAL_PROFILES: VPNProfile[] = [
   },
   {
     id: 'branch-hcm',
-    name: 'Chi nhánh TP.HCM',
+    name: 'Ho Chi Minh City Branch',
     serverAddress: 'vpn-hcm.company.internal',
     username: 'user.hcm@company.vn',
     password: '••••••••••••',

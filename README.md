@@ -60,12 +60,12 @@ Biểu tượng TMS VPN sẽ xuất hiện trên menu bar.
 
 ### Cách 1: qua app (khuyến nghị)
 
-1. Bấm biểu tượng **TMS VPN** trên menu bar, chọn **Thêm**.
-2. Nhập **Tên điểm nối** (tuỳ đặt), **Địa chỉ máy chủ**, **Tài khoản**, **Mật khẩu**, **PSK**.
-3. Giữ bật **Gửi toàn bộ lưu lượng qua VPN** nếu muốn mọi traffic đi qua VPN (xem [Full tunnel và split tunnel](#full-tunnel-và-split-tunnel)).
-4. Bật **công tắc** bên phải hồ sơ để kết nối (tắt công tắc để ngắt). Khi thành công, app hiện **ĐANG HOẠT ĐỘNG** kèm IP được cấp.
+1. Bấm biểu tượng **TMS VPN** trên menu bar, chọn **Add**.
+2. Nhập **Display name** (tuỳ đặt), **Server address**, **Account name**, **Password**, **Shared secret** (tức PSK), rồi bấm **Create**.
+3. Giữ bật **Send all traffic over VPN** nếu muốn mọi traffic đi qua VPN (xem [Full tunnel và split tunnel](#full-tunnel-và-split-tunnel)).
+4. Bật **công tắc** bên phải hồ sơ để kết nối (tắt công tắc để ngắt). Khi thành công, app hiện **ACTIVE** kèm IP được cấp.
 
-Muốn sửa hoặc xoá hồ sơ, mở menu bên cạnh công tắc rồi chọn **Chỉnh sửa** hoặc **Xóa hồ sơ**.
+Muốn sửa hoặc xoá hồ sơ, mở menu bên cạnh công tắc rồi chọn **Edit** hoặc **Delete**.
 
 PSK và mật khẩu được lưu trong **Keychain** của macOS, không nằm trong file cấu hình.
 
@@ -218,18 +218,35 @@ Binary tự hạ quyền về user thường ngay khi khởi động, và chỉ 
 
 ### Yêu cầu
 
-- Go theo `go.mod` (hiện là 1.27): `brew install go`.
-- App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ.
+- Go theo `go.mod` (hiện là 1.27): `brew install go`, rồi kiểm tra `go version`. Nếu vẫn ra bản cũ (ví dụ go1.19, và `go build` báo `invalid go version '1.27.1'`), máy đang có thêm bản Go cài từ gói `.pkg` ở `/usr/local/go`: chạy `hash -r` hoặc mở terminal mới, và nên gỡ bản cũ bằng `sudo rm -rf /usr/local/go /etc/paths.d/go`.
+- App: Xcode 26 / Swift 6, đúng như CI dùng. Swift 5.9 không build được `main.swift`; `build.sh` sẽ cảnh báo nếu toolchain cũ. Không có toolchain phù hợp thì tải bản app CI build sẵn cho mỗi PR: tab **Checks** của PR → workflow `test` → artifact **TMS-VPN-app**.
 - Prototype (tuỳ chọn): [bun](https://bun.sh).
 
 ### Build và cài bản local
 
+Mọi lệnh dưới đây chạy **ở thư mục gốc của repo** (nơi có `go.mod`). Chạy ở chỗ khác sẽ báo `go.mod file not found`.
+
 ```bash
+git clone https://github.com/tms-ninhle/vpn.git && cd vpn
+git checkout <branch>          # tuỳ chọn: thử code của một branch / PR
+
+# CLI — cài đúng chỗ và đúng quyền như installer (setuid-root + file owner)
 go build -o vpn ./cmd/vpn
-sudo install -o root -g wheel -m 4755 vpn /usr/local/bin/vpn       # setuid-root, giống installer
+sudo install -o root -g wheel -m 4755 vpn /usr/local/bin/vpn
 id -u | sudo tee /etc/vpn-owner-uid >/dev/null && sudo chmod 600 /etc/vpn-owner-uid
 
-bash build.sh                  # app: build/TMS VPN.app (universal arm64 + x86_64)
+# App — build.sh chỉ build ra build/TMS VPN.app, bước ditto mới cài vào /Applications
+bash build.sh
+ditto "build/TMS VPN.app" "/Applications/TMS VPN.app"
+```
+
+### Thử một PR mà không có Xcode 26
+
+CI build sẵn app cho mọi PR. Cài CLI từ branch của PR như trên, rồi lấy app từ artifact thay cho `bash build.sh`:
+
+```bash
+gh run download <run-id> --repo tms-ninhle/vpn -n TMS-VPN-app     # run-id: tab Checks của PR → workflow test
+unzip TMS-VPN.app.zip && ditto "TMS VPN.app" "/Applications/TMS VPN.app"
 ```
 
 ### Test

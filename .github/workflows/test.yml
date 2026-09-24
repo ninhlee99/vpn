@@ -1,8 +1,9 @@
 name: test
 
-# Gate for every change: formatting, vet and the full test suite. Runs on
-# macOS because the tree includes darwin-only packages (utun, routing), and
-# is reused by release.yml so nothing is published without passing it.
+# Gate for every change: formatting, vet, the full test suite and an app
+# build. Runs on macOS because the tree includes darwin-only packages (utun,
+# routing), and is reused by release.yml so nothing is published without
+# passing it.
 on:
   push:
     branches: [main]
@@ -35,3 +36,26 @@ jobs:
 
       - name: go test
         run: go test ./...
+
+  # The menu bar app only compiles with Xcode 26 / Swift 6, which developer
+  # machines may not have — so build it here on every change, catching
+  # Swift errors before a release does, and attach the result so a PR's UI
+  # changes can be tried without a local toolchain.
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build TMS VPN.app
+        run: bash build.sh
+
+      - name: Zip the app bundle
+        run: ditto -c -k --sequesterRsrc --keepParent "build/TMS VPN.app" TMS-VPN.app.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: TMS-VPN-app
+          path: TMS-VPN.app.zip
+          retention-days: 7

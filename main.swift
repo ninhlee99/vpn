@@ -250,7 +250,7 @@ final class VPNManager: ObservableObject {
             // to fix this itself (disconnect + repair + reconnect — see
             // scheduleStaleSessionRetry), so there's nothing here for a
             // person to decide. No alert, no button — the UI just stays on
-            // "Đang kết nối..." for as long as this keeps happening. An
+            // "Connecting..." for as long as this keeps happening. An
             // explicit OFF tap still works at any point (toggleConnect/
             // disconnect() both cancel this via cancelAutoRetry()).
             guard let profileName = activeProfileName else { return }
@@ -269,42 +269,60 @@ final class VPNManager: ObservableObject {
             alert = VPNAlertInfo(
                 kind: .generic,
                 title: "Server Verification Failed",
-                message: "Máy chủ không chứng minh được danh tính (có thể bị giả mạo). Không nhập lại mật khẩu — hãy đổi mạng và báo quản trị.",
+                message: "The server could not prove its identity and may be an impostor. Do not re-enter your password — switch networks and contact your administrator.",
                 detail: detail
             )
-            message = "Server Verification Failed: máy chủ có thể bị giả mạo."
+            message = "Server Verification Failed: the server may be an impostor."
         } else if stage == "PPP_AUTH_FAILURE" || detail.contains("CHAP authentication rejected") {
             alert = VPNAlertInfo(
                 kind: .authFailed,
                 title: "Authentication Failed",
-                message: "Xác thực PPP/CHAP thất bại: Sai tên tài khoản hoặc mật khẩu.",
+                message: "PPP/CHAP authentication failed: wrong account name or password.",
                 detail: detail.isEmpty ? "CHAP authentication rejected by peer" : detail
             )
-            message = "Authentication Failed: Sai tên tài khoản hoặc mật khẩu."
+            message = "Authentication Failed: wrong account name or password."
+        } else if stage.contains("IKE") && detail.contains("no response") {
+            // The server never answered at all — a network or server problem,
+            // not a wrong secret (that only shows up after the server replies).
+            alert = VPNAlertInfo(
+                kind: .ikeFailed,
+                title: "Server Not Responding",
+                message: "The VPN server did not answer. This network may be blocking VPN traffic (UDP 500/4500), or the server is down — try another network.",
+                detail: detail
+            )
+            message = "Server Not Responding: the VPN server did not answer."
+        } else if stage.contains("IKE") && detail.contains("IKE_PROPOSAL_MISMATCH") {
+            alert = VPNAlertInfo(
+                kind: .ikeFailed,
+                title: "Unsupported Server Settings",
+                message: "The server accepts none of the encryption settings this client offers. Send the logs (vpn logs) to your administrator.",
+                detail: detail
+            )
+            message = "Unsupported Server Settings: no common encryption proposal."
         } else if stage == "IKE_FAILED" || stage.contains("IKE") {
             alert = VPNAlertInfo(
                 kind: .ikeFailed,
                 title: "IKE Handshake Failed",
-                message: "Lỗi bắt tay IPsec IKE: Sai địa chỉ IP máy chủ hoặc sai Pre-shared Key (PSK).",
+                message: "IPsec IKE handshake failed: check the shared secret.",
                 detail: detail
             )
-            message = "IKE Handshake Failed: Sai IP máy chủ hoặc sai khóa PSK."
+            message = "IKE Handshake Failed: check the shared secret."
         } else if stage == "ROUTE_FAILURE" {
             alert = VPNAlertInfo(
                 kind: .routeFailed,
                 title: "Routing Error",
-                message: "Lỗi thiết lập định tuyến mạng. Hãy bấm Sửa mạng (Repair).",
+                message: "Could not set up network routes. Run `vpn repair`, then try again.",
                 detail: detail
             )
-            message = "Routing Error: Lỗi thiết lập định tuyến mạng."
+            message = "Routing Error: could not set up network routes."
         } else {
             alert = VPNAlertInfo(
                 kind: .generic,
-                title: stage.isEmpty ? "Lỗi kết nối" : stage,
-                message: detail.isEmpty ? "Kết nối thất bại" : detail,
+                title: stage.isEmpty ? "Connection Error" : stage,
+                message: detail.isEmpty ? "Connection failed" : detail,
                 detail: detail
             )
-            message = "\(stage.isEmpty ? "Lỗi kết nối" : stage): \(detail)"
+            message = "\(stage.isEmpty ? "Connection Error" : stage): \(detail)"
         }
 
         update(\.activeAlert, alert)
@@ -472,7 +490,7 @@ final class VPNManager: ObservableObject {
         let id = beginIntent(phase: "CONNECTING", profile: profileName, timeout: 45)
         if !silent {
             cancelAutoRetry()
-            update(\.errorMessage, "Đang đăng xuất phiên cũ & kết nối lại...")
+            update(\.errorMessage, "Signing out the previous session and reconnecting...")
         }
 
         let cli = self.cli
@@ -554,94 +572,21 @@ enum VPNColors {
 //
 // Every looping effect below is driven by TimelineView and derives its phase from
 // wall-clock time rather than `repeatForever` + `onAppear`. The old approach restarted
-// or froze whenever SwiftUI re-created the view (every state change or poll re-render),
-// which is what made the borders stutter. Tracing along the outline path also keeps the
-// light moving at constant speed; a rotating AngularGradient on a wide card raced along
-// the long edges and dropped out at the short ones.
+// or froze whenever SwiftUI re-created the view (every state change or poll re-render).
 
-/// A slice of a rounded-rect outline, wrapping past the path's start point.
-struct PerimeterSegment: Shape {
-    var cornerRadius: CGFloat
-    var inset: CGFloat
-    var start: CGFloat
-    var length: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        let outline = RoundedRectangle(cornerRadius: max(cornerRadius - inset, 0))
-            .path(in: rect.insetBy(dx: inset, dy: inset))
-        let end = start + length
-        if end <= 1 {
-            return outline.trimmedPath(from: start, to: end)
-        }
-        var path = outline.trimmedPath(from: start, to: 1)
-        path.addPath(outline.trimmedPath(from: 0, to: end - 1))
-        return path
-    }
-}
-
-/// A comet of light that travels around a rounded rectangle, fading out along its tail.
-struct TracingBorder: View {
-    var cornerRadius: CGFloat
-    var color: Color
-    var highlight: Color
-    var period: Double
-    var lineWidth: CGFloat = 1.6
-    var tailLength: CGFloat = 0.3
-
-    private let tailSteps = 8
-
-    var body: some View {
-        TimelineView(.animation) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let head = CGFloat((t / period).truncatingRemainder(dividingBy: 1))
-            ZStack {
-                // Overlapping segments that all end at the head: alpha accumulates towards
-                // the head, giving a smooth fade without a gradient along the path.
-                ForEach(0..<tailSteps, id: \.self) { i in
-                    let length = tailLength * CGFloat(tailSteps - i) / CGFloat(tailSteps)
-                    PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
-                                     start: wrapUnit(head - length), length: length)
-                        .stroke(color.opacity(0.28), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                }
-                PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
-                                 start: wrapUnit(head - 0.04), length: 0.04)
-                    .stroke(highlight, style: StrokeStyle(lineWidth: lineWidth + 0.4, lineCap: .round))
-                    .shadow(color: color, radius: 4)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func wrapUnit(_ x: CGFloat) -> CGFloat {
-        x - x.rounded(.down)
-    }
-}
-
-/// Outline for a card / badge: faint idle stroke, amber comet while connecting,
-/// slower green comet (or a static glow) once connected. Crossfades between states.
+/// Outline for a card / badge: a static stroke whose color follows the link
+/// state — faint when idle, amber while connecting, green once connected —
+/// crossfading between states.
 struct StatusBorder: View {
     var state: LinkState
     var cornerRadius: CGFloat
     var idleColor: Color = Color.white.opacity(0.08)
-    var lineWidth: CGFloat = 1.6
-    var tracesWhenConnected: Bool = true
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(baseColor, lineWidth: 1)
-
-            if state == .connecting {
-                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.amber, highlight: VPNColors.amberBright,
-                              period: 1.8, lineWidth: lineWidth, tailLength: 0.35)
-                    .transition(.opacity)
-            } else if state == .connected && tracesWhenConnected {
-                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.green, highlight: VPNColors.greenBright,
-                              period: 3.6, lineWidth: lineWidth, tailLength: 0.22)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.35), value: state)
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .strokeBorder(baseColor, lineWidth: 1)
+            .animation(.easeInOut(duration: 0.35), value: state)
+            .allowsHitTesting(false)
     }
 
     private var baseColor: Color {
@@ -725,10 +670,7 @@ struct MacOSMenuBar: View {
                         .transition(.opacity)
                 }
 
-                // Connected stays static in the menu bar: an always-visible 60fps loop
-                // would keep the app redrawing for as long as the tunnel is up.
-                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15),
-                             lineWidth: 1.5, tracesWhenConnected: false)
+                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15))
 
                 Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield"))
                     .font(.system(size: 13, weight: .semibold))
@@ -775,9 +717,9 @@ struct CustomMenuButton: View {
 
     private func showNativeMenu() {
         let menu = NSMenu()
-        let editItem = NSMenuItem(title: "Chỉnh sửa", action: #selector(MenuHelper.editAction), keyEquivalent: "")
-        let deleteItem = NSMenuItem(title: "Xóa hồ sơ", action: #selector(MenuHelper.deleteAction), keyEquivalent: "")
-        deleteItem.attributedTitle = NSAttributedString(string: "Xóa hồ sơ", attributes: [.foregroundColor: NSColor.systemRed])
+        let editItem = NSMenuItem(title: "Edit", action: #selector(MenuHelper.editAction), keyEquivalent: "")
+        let deleteItem = NSMenuItem(title: "Delete", action: #selector(MenuHelper.deleteAction), keyEquivalent: "")
+        deleteItem.attributedTitle = NSAttributedString(string: "Delete", attributes: [.foregroundColor: NSColor.systemRed])
 
         let helper = MenuHelper(onEdit: onEdit, onDelete: onDelete)
         editItem.target = helper
@@ -836,7 +778,7 @@ struct ProfileCardRow: View {
 
                 ZStack(alignment: .leading) {
                     if state == .connecting {
-                        Text("Đang kết nối đến máy chủ...")
+                        Text("Connecting to server...")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(VPNColors.amber)
                             .lineLimit(1)
@@ -916,7 +858,7 @@ struct MenuBarPopupView: View {
                         )
 
                     StatusBorder(state: state, cornerRadius: 12,
-                                 idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 2)
+                                 idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6))
 
                     Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield.fill"))
                         .font(.system(size: 20))
@@ -946,7 +888,7 @@ struct MenuBarPopupView: View {
                         glowing: state == .connected
                     )
                     ZStack(alignment: .leading) {
-                        Text(state == .connected ? "Đã kết nối" : (state == .connecting ? "Đang kết nối..." : "Đã ngắt kết nối"))
+                        Text(state == .connected ? "Connected" : (state == .connecting ? "Connecting..." : "Not Connected"))
                             .font(.system(size: 13, weight: .medium))
                             .foregroundColor(state == .connected ? VPNColors.green : (state == .connecting ? VPNColors.amber : Color.gray))
                             .id(state)
@@ -966,7 +908,7 @@ struct MenuBarPopupView: View {
             if state == .connected {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("ĐANG HOẠT ĐỘNG")
+                        Text("ACTIVE")
                             .font(.system(size: 10, weight: .bold))
                             .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.55))
                         HStack(spacing: 8) {
@@ -984,7 +926,7 @@ struct MenuBarPopupView: View {
                     }
                     Spacer()
                     Button(action: { vpn.disconnect() }) {
-                        Text("Ngắt kết nối")
+                        Text("Disconnect")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(Color.red.opacity(0.9))
                             .padding(.horizontal, 8)
@@ -1006,7 +948,7 @@ struct MenuBarPopupView: View {
 
             // Subheader: Profile List Header
             HStack {
-                Text("DANH SÁCH")
+                Text("CONFIGURATIONS")
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color(red: 0.52, green: 0.58, blue: 0.66))
                 Spacer()
@@ -1014,7 +956,7 @@ struct MenuBarPopupView: View {
                     HStack(spacing: 4) {
                         Image(systemName: "plus")
                             .font(.system(size: 10, weight: .bold))
-                        Text("Thêm")
+                        Text("Add")
                             .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
@@ -1039,10 +981,10 @@ struct MenuBarPopupView: View {
                         .font(.system(size: 32))
                         .foregroundColor(Color.gray.opacity(0.5))
                         .padding(.top, 10)
-                    Text("Chưa có hồ sơ VPN nào")
+                    Text("No VPN configurations")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.gray)
-                    Text("Nhấn nút \"+ Thêm\" để cấu hình máy chủ đầu tiên.")
+                    Text("Click \"+ Add\" to set up your first VPN.")
                         .font(.system(size: 11))
                         .foregroundColor(Color.gray.opacity(0.7))
                         .multilineTextAlignment(.center)
@@ -1068,7 +1010,7 @@ struct MenuBarPopupView: View {
             // session never reaches here — it's recovered silently, with no
             // alert at all (see VPNManager.applyFailure) — so `.sessionStale`
             // no longer appears as a real activeAlert.kind.
-            if let alert = vpn.activeAlert ?? (vpn.errorMessage != nil ? VPNAlertInfo(kind: .generic, title: "Lỗi kết nối", message: vpn.errorMessage ?? "", detail: "") : nil) {
+            if let alert = vpn.activeAlert ?? (vpn.errorMessage != nil ? VPNAlertInfo(kind: .generic, title: "Connection Error", message: vpn.errorMessage ?? "", detail: "") : nil) {
                 VStack(alignment: .leading, spacing: 8) {
                     // Header Badge & Title
                     HStack(spacing: 6) {
@@ -1082,7 +1024,7 @@ struct MenuBarPopupView: View {
 
                         Spacer()
 
-                        Text(alert.kind == .sessionStale ? "Phiên tồn đọng" : (alert.kind == .authFailed ? "Lỗi tài khoản" : "Cảnh báo"))
+                        Text(alert.kind == .sessionStale ? "Stale Session" : (alert.kind == .authFailed ? "Credentials" : "Warning"))
                             .font(.system(size: 9.5, weight: .bold))
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -1118,7 +1060,7 @@ struct MenuBarPopupView: View {
                                 }) {
                                     HStack(spacing: 4) {
                                         Image(systemName: "pencil")
-                                        Text("Chỉnh sửa mật khẩu hồ sơ")
+                                        Text("Edit Password")
                                     }
                                     .font(.system(size: 11, weight: .semibold))
                                     .foregroundColor(.white)
@@ -1136,7 +1078,7 @@ struct MenuBarPopupView: View {
                                 vpn.errorMessage = nil
                                 vpn.activeAlert = nil
                             }) {
-                                Text("Bỏ qua")
+                                Text("Dismiss")
                                     .font(.system(size: 11))
                                     .foregroundColor(.gray)
                                     .padding(.horizontal, 8)
@@ -1174,7 +1116,7 @@ struct MenuBarPopupView: View {
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     HStack(spacing: 5) {
                         Image(systemName: "rectangle.portrait.and.arrow.right")
-                        Text("Thoát").font(.system(size: 12, weight: .medium))
+                        Text("Quit").font(.system(size: 12, weight: .medium))
                         Text("⌘Q").font(.system(size: 10, weight: .semibold)).foregroundColor(Color.gray.opacity(0.6))
                     }
                     .foregroundColor(Color(red: 0.7, green: 0.74, blue: 0.8))
@@ -1277,7 +1219,7 @@ struct ProfileFormSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text(isEdit ? "Chỉnh Sửa Hồ Sơ VPN" : "Thêm Hồ Sơ VPN L2TP")
+                Text(isEdit ? "Edit VPN Configuration" : "Add L2TP VPN Configuration")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundColor(.white)
                 Spacer()
@@ -1290,49 +1232,49 @@ struct ProfileFormSheet: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Tên điểm nối")
+                Text("Display name")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                CleanDarkTextField(placeholder: "VD: Trụ sở chính (Prod)", text: $name, isDisabled: isEdit)
+                CleanDarkTextField(placeholder: "Required", text: $name, isDisabled: isEdit)
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Địa chỉ máy chủ (IP / Host)")
+                Text("Server address")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                CleanDarkTextField(placeholder: "VD: vpn.company.com hoặc 1.2.3.4", text: $server)
+                CleanDarkTextField(placeholder: "vpn.example.com or 1.2.3.4", text: $server)
             }
 
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Tài khoản (Username)")
+                    Text("Account name")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                    CleanDarkTextField(placeholder: "Tên đăng nhập", text: $user)
+                    CleanDarkTextField(placeholder: "Required", text: $user)
                 }
 
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("Mật khẩu")
+                    Text("Password")
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                    CleanDarkSecureField(placeholder: "Mật khẩu tài khoản", text: $password)
+                    CleanDarkSecureField(placeholder: "Required", text: $password)
                 }
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Khóa bí mật chia sẻ IPsec (PSK)")
+                Text("Shared secret")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                CleanDarkSecureField(placeholder: "Pre-shared key", text: $psk)
+                CleanDarkSecureField(placeholder: "Required", text: $psk)
             }
 
             // Native macOS Switch Toggle for Send All Traffic
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Gửi toàn bộ lưu lượng qua VPN")
+                    Text("Send all traffic over VPN")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(Color(red: 0.88, green: 0.92, blue: 0.96))
-                    Text("Định tuyến tất cả Internet qua VPN (Send all traffic)")
+                    Text("Route all internet traffic through the VPN")
                         .font(.system(size: 10))
                         .foregroundColor(Color.gray)
                 }
@@ -1349,13 +1291,13 @@ struct ProfileFormSheet: View {
 
             HStack(spacing: 10) {
                 Spacer()
-                Button("Hủy") {
+                Button("Cancel") {
                     isPresented = false
                 }
                 .keyboardShortcut(.cancelAction)
                 .buttonStyle(SecondaryButtonStyle())
 
-                Button(isEdit ? "Cập nhật" : "Lưu") {
+                Button(isEdit ? "Save" : "Create") {
                     guard !name.trimmingCharacters(in: .whitespaces).isEmpty,
                           !server.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     

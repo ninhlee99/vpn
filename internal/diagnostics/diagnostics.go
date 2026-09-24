@@ -5,13 +5,15 @@ package diagnostics
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os/exec"
 	"strconv"
 	"strings"
-	"time"
 
+	"vpn/internal/config"
+	"vpn/internal/ike"
 	"vpn/internal/sysbin"
 )
 
@@ -40,9 +42,14 @@ type Connectivity struct {
 	ServerHost     string   `json:"server_host"`
 	ResolvedIPs    []string `json:"resolved_ips"`
 	DNSOK          bool     `json:"dns_ok"`
-	UDP500Reached  bool     `json:"udp_500_reached"`
-	UDP4500Reached bool     `json:"udp_4500_reached"`
-	PingRTTMillis  float64  `json:"ping_rtt_ms,omitempty"`
+	UDP500Reached  bool     `json:"udp_500_reached"`  // an IKE responder answered MM1 on UDP/500
+	UDP4500Reached bool     `json:"udp_4500_reached"` // ...and on UDP/4500 (NAT-T)
+	// FromPort500 is the UDP/500 probe repeated from local port 500, the
+	// port connect uses first: "ok", "no-answer", or "skipped" (needs root /
+	// port busy). "no-answer" while UDP500Reached means the network drops
+	// IKE sourced from 500; connect then falls back to another port.
+	FromPort500   string  `json:"udp_500_from_port_500"`
+	PingRTTMillis float64 `json:"ping_rtt_ms,omitempty"`
 }
 
 // MTUProbe is the result of testing one packet size for fragmentation.
@@ -65,7 +72,9 @@ type Report struct {
 var probeSizes = []int{1500, 1492, 1400, 1380, 1360, 1280}
 
 // Run performs every diagnostic against server (host or IP, no port).
-func Run(ctx context.Context, server string) *Report {
+// elevate, when non-nil, raises privilege for the one probe that must bind
+// local UDP/500; nil skips that probe.
+func Run(ctx context.Context, server string, elevate func(func() error) error) *Report {
 	r := &Report{}
 
 	r.Network = probeNetwork()
@@ -87,8 +96,25 @@ func Run(ctx context.Context, server string) *Report {
 		r.Connectivity.PingRTTMillis = rtt
 	}
 
-	r.Connectivity.UDP500Reached = udpProbe(ctx, target, 500)
-	r.Connectivity.UDP4500Reached = udpProbe(ctx, target, 4500)
+	ip := net.ParseIP(target)
+	r.Connectivity.UDP500Reached = r.ikeProbe(ctx, ip, 500, 0)
+	r.Connectivity.UDP4500Reached = r.ikeProbe(ctx, ip, 4500, 0)
+	r.Connectivity.FromPort500 = "skipped"
+	if elevate != nil {
+		probeErr := errors.New("not run")
+		if elevErr := elevate(func() error {
+			probeErr = ike.ProbeResponder(ctx, ip, 500, 500, config.DefaultIKEProposals)
+			return nil
+		}); elevErr != nil {
+			probeErr = elevErr // could not raise privilege: the probe never ran
+		}
+		switch {
+		case probeErr == nil:
+			r.Connectivity.FromPort500 = "ok"
+		case errors.Is(probeErr, ike.ErrNoResponse):
+			r.Connectivity.FromPort500 = "no-answer"
+		}
+	}
 	if !r.Connectivity.UDP500Reached && !r.Connectivity.UDP4500Reached {
 		r.FailureStage = StageUDP500
 	}
@@ -198,29 +224,16 @@ func pingRTT(ip string) (float64, error) {
 // immediate ICMP port-unreachable — this cannot prove a listener answered
 // (UDP has no handshake), only that nothing actively refused it, which is
 // exactly the signal diagnose needs before a real IKE attempt.
-func udpProbe(ctx context.Context, host string, port int) bool {
-	d := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := d.DialContext(ctx, "udp4", net.JoinHostPort(host, strconv.Itoa(port)))
-	if err != nil {
-		return false
+// ikeProbe reports whether an IKE responder answers a real MM1 on
+// serverPort. A bare UDP send cannot tell "open" from "silently dropped" —
+// the previous probe treated silence as reachable and passed on networks
+// that drop IKE.
+func (r *Report) ikeProbe(ctx context.Context, ip net.IP, serverPort, localPort int) bool {
+	err := ike.ProbeResponder(ctx, ip, serverPort, localPort, config.DefaultIKEProposals)
+	if err != nil && !errors.Is(err, ike.ErrNoResponse) {
+		r.Errors = append(r.Errors, fmt.Sprintf("IKE probe UDP/%d: %v", serverPort, err))
 	}
-	defer conn.Close()
-	// One-byte probe. A real ISAKMP/ESP listener stays silent for a bare
-	// probe; the goal here is only to catch a hard ICMP refusal, which
-	// surfaces as a write or immediate read error, not a timeout.
-	if _, err := conn.Write([]byte{0}); err != nil {
-		return false
-	}
-	_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-	buf := make([]byte, 1)
-	_, err = conn.Read(buf)
-	if err != nil {
-		if ne, ok := err.(net.Error); ok && ne.Timeout() {
-			return true // silence, not refusal — treated as reachable
-		}
-		return false // ICMP unreachable surfaces as a read error here
-	}
-	return true
+	return err == nil
 }
 
 func probeMTU(ip string) []MTUProbe {
