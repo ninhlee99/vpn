@@ -24,6 +24,7 @@ type Snapshot struct {
 	hostRouteAdded   bool
 	overrideAdded    bool
 	tunIface         string
+	tunnelHosts      []string // split tunnel: hosts (the pushed DNS servers) routed into the tunnel
 }
 
 // ipv4OverrideNets are the split-default halves that steer all IPv4 traffic
@@ -143,6 +144,27 @@ func (s *Snapshot) ApplyFullTunnel(tunIface string) error {
 	return nil
 }
 
+// RouteHostsViaTunnel sends traffic for hosts into the tunnel. Split tunnel
+// needs this for the DNS servers the LNS pushes: they are applied as the
+// system resolvers, but without a route through the tunnel a server on the
+// LNS's private network is unreachable and every lookup fails. (Full
+// tunnel already covers them with the /1 overrides.)
+func (s *Snapshot) RouteHostsViaTunnel(hosts []string, tunIface string) error {
+	s.tunIface = tunIface
+	for _, h := range hosts {
+		_ = exec.Command(sysbin.Route, "-n", "delete", "-host", h).Run()
+		s.tunnelHosts = append(s.tunnelHosts, h) // before add: Restore must remove a partial success
+		if out, err := exec.Command(sysbin.Route, tunnelHostAddArgs(h, tunIface)...).CombinedOutput(); err != nil {
+			return fmt.Errorf("route %s via %s: %w (%s)", h, tunIface, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
+}
+
+func tunnelHostAddArgs(host, tunIface string) []string {
+	return []string{"-n", "add", "-static", "-host", host, "-interface", tunIface}
+}
+
 // ipv6RouteArgs is the `route` argv prefix addressing one IPv6 /1 half.
 func ipv6RouteArgs(verb, net string) []string {
 	return []string{"-n", verb, "-inet6", "-net", net, "-prefixlen", "1"}
@@ -188,6 +210,9 @@ func (s *Snapshot) reassertCommands() [][]string {
 		for _, net := range ipv6RejectNets {
 			adds = append(adds, ipv6RejectAddArgs(net))
 		}
+	}
+	for _, h := range s.tunnelHosts {
+		adds = append(adds, tunnelHostAddArgs(h, s.tunIface))
 	}
 	return adds
 }
@@ -237,6 +262,11 @@ func (s *Snapshot) Restore() error {
 			if out, err := exec.Command(sysbin.Route, ipv6RouteArgs("delete", net)...).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 				errs = append(errs, fmt.Sprintf("remove IPv6 reject route %s/1: %v (%s)", net, err, strings.TrimSpace(string(out))))
 			}
+		}
+	}
+	for _, h := range s.tunnelHosts {
+		if out, err := exec.Command(sysbin.Route, "-n", "delete", "-host", h).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
+			errs = append(errs, fmt.Sprintf("remove tunnel host route %s: %v (%s)", h, err, strings.TrimSpace(string(out))))
 		}
 	}
 	if s.hostRouteAdded && s.VPNServerIP != "" {
