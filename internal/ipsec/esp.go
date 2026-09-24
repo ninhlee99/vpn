@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"hash"
 	"math"
+	"sync"
 )
 
 // Cipher is the ESP encryption transform of an SA.
@@ -50,6 +51,11 @@ type SA struct {
 	newHash func() hash.Hash
 	icvLen  int
 
+	// mu serializes Encrypt/Decrypt: several goroutines send on the same SA
+	// (the utun pump, PPP/L2TP control replies), and an unsynchronized
+	// seq++ could put two packets on the wire with one sequence number —
+	// the second then dropped by the peer as a replay.
+	mu         sync.Mutex
 	seq        uint32 // outbound: last sequence number sent
 	replaySeen [64]bool
 	replayBase uint32
@@ -94,6 +100,8 @@ func NewSA(spi uint32, c Cipher, i Integrity, encKey, authKey []byte) (*SA, erro
 // packet, RFC 4303 format: SPI | Seq | IV | ciphertext(payload | pad | pad-len | next-header) | ICV.
 // nextHeader is the IP protocol number of payload (17 for UDP).
 func (sa *SA) Encrypt(payload []byte, nextHeader byte) ([]byte, error) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	// RFC 4303 §3.3.3: the sequence number must never cycle within one SA.
 	if sa.seq == math.MaxUint32 {
 		return nil, fmt.Errorf("ESP sequence number exhausted — SA must be rekeyed")
@@ -137,6 +145,8 @@ func (sa *SA) Encrypt(payload []byte, nextHeader byte) ([]byte, error) {
 // decrypts, strips padding, and returns the inner payload plus its
 // next-header protocol number.
 func (sa *SA) Decrypt(pkt []byte) (payload []byte, nextHeader byte, err error) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
 	blockLen := sa.block.BlockSize()
 	if len(pkt) < 8+blockLen+blockLen+sa.icvLen {
 		return nil, 0, fmt.Errorf("ESP packet too short: %d bytes", len(pkt))

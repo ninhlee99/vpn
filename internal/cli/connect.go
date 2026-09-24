@@ -29,6 +29,7 @@ func cmdConnect(args []string) error {
 	accountName := fs.String("account", "", "account to use (default: profile's default account)")
 	timeout := fs.Duration("timeout", 30*time.Second, "overall connect timeout")
 	verbose := fs.Bool("verbose", false, "verbose protocol logging")
+	rekeyAfter := fs.Duration("rekey-after", 0, "rekey the ESP SAs this often instead of at half their lifetime (testing)")
 	// -d/--daemon are accepted but always on — connect always backgrounds
 	// itself now; the flags exist only so old scripts/muscle memory using
 	// `vpn connect -d` don't break.
@@ -39,7 +40,7 @@ func cmdConnect(args []string) error {
 	}
 
 	if os.Getenv(daemonChildEnv) == "1" {
-		return doConnect(*profileName, *accountName, *timeout, *verbose)
+		return doConnect(*profileName, *accountName, *timeout, *verbose, *rekeyAfter)
 	}
 
 	// Catch configuration problems here, where the user can see them: the
@@ -190,7 +191,7 @@ func (t *connectTarget) errNoPassword(cause error) error {
 	return errors.New(msg)
 }
 
-func doConnect(profileName, accountName string, timeout time.Duration, verbose bool) error {
+func doConnect(profileName, accountName string, timeout time.Duration, verbose bool, rekeyAfter time.Duration) error {
 	t, err := resolveTarget(profileName, accountName)
 	if err != nil {
 		return err
@@ -218,6 +219,7 @@ func doConnect(profileName, accountName string, timeout time.Duration, verbose b
 		FullTunnel:   p.FullTunnel,
 		Timeout:      timeout,
 		Verbose:      verbose,
+		RekeyAfter:   rekeyAfter,
 	})
 }
 
