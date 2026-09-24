@@ -572,108 +572,21 @@ enum VPNColors {
 //
 // Every looping effect below is driven by TimelineView and derives its phase from
 // wall-clock time rather than `repeatForever` + `onAppear`. The old approach restarted
-// or froze whenever SwiftUI re-created the view (every state change or poll re-render),
-// which is what made the borders stutter. Tracing along the outline path also keeps the
-// light moving at constant speed; a rotating AngularGradient on a wide card raced along
-// the long edges and dropped out at the short ones.
+// or froze whenever SwiftUI re-created the view (every state change or poll re-render).
 
-/// A slice of a rounded-rect outline, wrapping past the path's start point.
-struct PerimeterSegment: Shape {
-    var cornerRadius: CGFloat
-    var inset: CGFloat
-    var start: CGFloat
-    var length: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        let outline = RoundedRectangle(cornerRadius: max(cornerRadius - inset, 0))
-            .path(in: rect.insetBy(dx: inset, dy: inset))
-        let end = start + length
-        if end <= 1 {
-            return outline.trimmedPath(from: start, to: end)
-        }
-        var path = outline.trimmedPath(from: start, to: 1)
-        path.addPath(outline.trimmedPath(from: 0, to: end - 1))
-        return path
-    }
-}
-
-/// A comet of light that travels around a rounded rectangle, fading out along its tail.
-struct TracingBorder: View {
-    var cornerRadius: CGFloat
-    var color: Color
-    var highlight: Color
-    var period: Double
-    var lineWidth: CGFloat = 1.6
-    var tailLength: CGFloat = 0.3
-    /// Minimum seconds between frames; nil follows the display's refresh rate.
-    var frameInterval: Double? = nil
-
-    private let tailSteps = 8
-
-    var body: some View {
-        TimelineView(.animation(minimumInterval: frameInterval)) { timeline in
-            let t = timeline.date.timeIntervalSinceReferenceDate
-            let head = CGFloat((t / period).truncatingRemainder(dividingBy: 1))
-            ZStack {
-                // Overlapping segments that all end at the head: alpha accumulates towards
-                // the head, giving a smooth fade without a gradient along the path.
-                ForEach(0..<tailSteps, id: \.self) { i in
-                    let length = tailLength * CGFloat(tailSteps - i) / CGFloat(tailSteps)
-                    PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
-                                     start: wrapUnit(head - length), length: length)
-                        .stroke(color.opacity(0.28), style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                }
-                PerimeterSegment(cornerRadius: cornerRadius, inset: lineWidth / 2,
-                                 start: wrapUnit(head - 0.04), length: 0.04)
-                    .stroke(highlight, style: StrokeStyle(lineWidth: lineWidth + 0.4, lineCap: .round))
-                    .shadow(color: color, radius: 4)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func wrapUnit(_ x: CGFloat) -> CGFloat {
-        x - x.rounded(.down)
-    }
-}
-
-/// Outline for a card / badge: faint idle stroke, then a comet travelling the
-/// border — amber while connecting, green once connected, with the same speed
-/// and tail in both so success reads as a continuation of the same motion.
-/// Crossfades between states.
+/// Outline for a card / badge: a static stroke whose color follows the link
+/// state — faint when idle, amber while connecting, green once connected —
+/// crossfading between states.
 struct StatusBorder: View {
     var state: LinkState
     var cornerRadius: CGFloat
     var idleColor: Color = Color.white.opacity(0.08)
-    var lineWidth: CGFloat = 1.6
-    /// Passed to TracingBorder: throttles the comet's frame rate (nil = display rate).
-    var frameInterval: Double? = nil
-
-    /// One lap of the comet, in seconds, and its tail as a fraction of the
-    /// perimeter — shared by the connecting and connected states.
-    static let cometPeriod: Double = 1.8
-    static let cometTail: CGFloat = 0.35
-    /// Frame cap for the always-visible menu bar icon.
-    static let menuBarFrameInterval: Double = 1.0 / 30
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(baseColor, lineWidth: 1)
-
-            if state == .connecting {
-                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.amber, highlight: VPNColors.amberBright,
-                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail,
-                              frameInterval: frameInterval)
-                    .transition(.opacity)
-            } else if state == .connected {
-                TracingBorder(cornerRadius: cornerRadius, color: VPNColors.green, highlight: VPNColors.greenBright,
-                              period: Self.cometPeriod, lineWidth: lineWidth, tailLength: Self.cometTail,
-                              frameInterval: frameInterval)
-                    .transition(.opacity)
-            }
-        }
-        .animation(.easeInOut(duration: 0.35), value: state)
+        RoundedRectangle(cornerRadius: cornerRadius)
+            .strokeBorder(baseColor, lineWidth: 1)
+            .animation(.easeInOut(duration: 0.35), value: state)
+            .allowsHitTesting(false)
     }
 
     private var baseColor: Color {
@@ -757,11 +670,7 @@ struct MacOSMenuBar: View {
                         .transition(.opacity)
                 }
 
-                // The menu bar icon is always on screen, so its comet keeps the app
-                // redrawing for as long as the tunnel is up: cap it at 30fps (plenty
-                // for a 22px icon) instead of the display's 60-120Hz.
-                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15),
-                             lineWidth: 1.5, frameInterval: StatusBorder.menuBarFrameInterval)
+                StatusBorder(state: state, cornerRadius: 6, idleColor: Color.white.opacity(0.15))
 
                 Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield"))
                     .font(.system(size: 13, weight: .semibold))
@@ -949,7 +858,7 @@ struct MenuBarPopupView: View {
                         )
 
                     StatusBorder(state: state, cornerRadius: 12,
-                                 idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6), lineWidth: 2)
+                                 idleColor: Color(red: 0.12, green: 0.55, blue: 0.65).opacity(0.6))
 
                     Image(systemName: state == .connected ? "checkmark.shield.fill" : (state == .connecting ? "shield.lefthalf.filled" : "shield.fill"))
                         .font(.system(size: 20))

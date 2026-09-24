@@ -224,7 +224,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟠 Connecting (tracing border)
+            🟠 Connecting
           </button>
           <button
             onClick={() => {
@@ -237,7 +237,7 @@ export default function App() {
                 : 'text-slate-400 hover:text-white hover:bg-white/5'
             }`}
           >
-            🟢 Connected (tracing border)
+            🟢 Connected
           </button>
           <button
             onClick={() => {
