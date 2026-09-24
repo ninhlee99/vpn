@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"syscall"
 	"time"
 
 	"vpn/internal/vpnlog"
@@ -18,10 +21,10 @@ const stage = "IKE"
 // times with a fixed backoff before the exchange gives up with a timeout —
 // simple and bounded, matching how racoon/strongSwan behave by default
 // (their defaults are a few seconds per retry, a handful of retries).
-const (
-	retransmitInterval = 3 * time.Second
-	maxRetransmits     = 5
-)
+const maxRetransmits = 5
+
+// retransmitInterval is a variable only so tests can shorten it.
+var retransmitInterval = 3 * time.Second
 
 // Session is an established Phase 1 (IKE) SA: everything Phase 2 (Quick
 // Mode / ESP) needs to proceed, without re-deriving anything.
@@ -54,8 +57,9 @@ type Session struct {
 	EstablishedAt time.Time
 	Lifetime      time.Duration
 
-	dp      *dataPlane // set by StartDataPhase; from then on the reader owns the socket
-	floated bool       // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
+	dp             *dataPlane // set by StartDataPhase; from then on the reader owns the socket
+	mm1Retransmits int        // >0: MM1\'s retransmit budget, shortened when a fallback port follows
+	floated        bool       // once true, every send/receive is framed with RFC 3947/3948's 4-byte non-ESP marker
 }
 
 // nonESPMarker is RFC 3947 §3's 4 zero bytes prepended to every IKE (not
@@ -77,6 +81,12 @@ type Config struct {
 // (MM1–MM6) against cfg.ServerHost:500, including RFC 3947 NAT-T detection
 // and, if NAT is found, floating to :4500 for MM5/MM6 as required.
 func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
+	return establishPhase1To(ctx, cfg, 500)
+}
+
+// establishPhase1To is EstablishPhase1 against an arbitrary server port, so
+// tests can run against a local responder.
+func establishPhase1To(ctx context.Context, cfg Config, serverPort int) (*Session, error) {
 	transforms := make([]Transform, 0, len(cfg.Proposals))
 	for _, p := range cfg.Proposals {
 		t, err := ParseProposal(p)
@@ -86,7 +96,7 @@ func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
 		transforms = append(transforms, t)
 	}
 
-	serverAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.ServerHost, "500"))
+	serverAddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(cfg.ServerHost, strconv.Itoa(serverPort)))
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s: %w", cfg.ServerHost, err)
 	}
@@ -105,23 +115,65 @@ func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
 	// bit us once ApplyFullTunnel's split-default routes are in the
 	// picture and something reshuffles the route table. Pinning to a
 	// specific local address removes that ambiguity.
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: cfg.LocalIP, Port: 500})
-	if err != nil {
-		return nil, fmt.Errorf("bind local UDP/500 on %s (needs root, or another IKE client is already using it): %w", cfg.LocalIP, err)
-	}
-
-	sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP}
-	if _, err := rand.Read(sess.InitiatorSPI[:]); err != nil {
+	var lastErr error
+	for i, port := range phase1LocalPorts {
+		last := i+1 == len(phase1LocalPorts)
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: cfg.LocalIP, Port: port})
+		if err != nil {
+			lastErr = fmt.Errorf("bind local UDP/%d on %s (needs root, or another IKE client is already using it): %w", port, cfg.LocalIP, err)
+			if !last && isAddrInUse(err) {
+				vpnlog.Error(stage, "local UDP/500 is taken — retrying from another port", vpnlog.Fields{"err": err})
+				continue
+			}
+			return nil, lastErr
+		}
+		sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP}
+		if !last {
+			// Leave time for the fallback inside the caller's connect timeout.
+			sess.mm1Retransmits = firstPortMM1Retransmits
+		}
+		if _, err := rand.Read(sess.InitiatorSPI[:]); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("generate initiator SPI: %w", err)
+		}
+		err = sess.runMainMode(ctx, cfg, transforms)
+		if err == nil {
+			return sess, nil
+		}
 		conn.Close()
-		return nil, fmt.Errorf("generate initiator SPI: %w", err)
-	}
-
-	if err := sess.runMainMode(ctx, cfg, transforms); err != nil {
-		conn.Close()
+		lastErr = err
+		if !last && errors.Is(err, errMM1Unanswered) {
+			vpnlog.Error(stage, "no answer to MM1 from local UDP/500 — retrying from another port", nil)
+			continue
+		}
 		return nil, err
 	}
-	return sess, nil
+	return nil, lastErr
 }
+
+// phase1LocalPorts are the local ports tried, in order, for the pre-NAT-T
+// exchange. 500 first: some responders and firewalls expect an IKE client
+// to use it (see the bind comment above). Then any free port, because some
+// networks drop or swallow IKE sourced from UDP/500 — e.g. a router's
+// "IPsec passthrough" that admits a single client per server, or one still
+// holding state for an earlier client — while answering other ports fine
+// (confirmed live). A non-500 source port shows up as NAT in NAT-D, so the
+// exchange then floats to UDP/4500 as usual.
+var phase1LocalPorts = []int{500, 0}
+
+// firstPortMM1Retransmits keeps the UDP/500 attempt short (2 sends, ~6s)
+// so the fallback still fits a 30s connect timeout.
+const firstPortMM1Retransmits = 1
+
+// errMM1Unanswered marks a Main Mode that failed because MM1 got no reply at
+// all — the only failure worth retrying from another local port; anything
+// later means the server did answer.
+var errMM1Unanswered = errors.New("MM1 unanswered")
+
+func isAddrInUse(err error) bool { return errors.Is(err, syscall.EADDRINUSE) }
+
+// ErrNoResponse is wrapped by every exchange that exhausted its retransmits.
+var ErrNoResponse = errors.New("no response")
 
 // exchange sends msg to s.destAddr and waits for a reply from the server's
 // IP on *any* source port (see the Session doc comment for why). It keeps
@@ -130,12 +182,24 @@ func EstablishPhase1(ctx context.Context, cfg Config) (*Session, error) {
 // interleaved with the real reply is normal IKE traffic, not a failure —
 // only a full retransmit-budget of silence is IKE_TIMEOUT.
 func (s *Session) exchange(ctx context.Context, msg []byte, expectMinLen int) ([]byte, error) {
+	return s.exchangeN(ctx, msg, expectMinLen, maxRetransmits)
+}
+
+func (s *Session) mm1RetransmitBudget() int {
+	if s.mm1Retransmits > 0 {
+		return s.mm1Retransmits
+	}
+	return maxRetransmits
+}
+
+// exchangeN is exchange with an explicit retransmit budget.
+func (s *Session) exchangeN(ctx context.Context, msg []byte, expectMinLen, retransmits int) ([]byte, error) {
 	wire := msg
 	if s.floated {
 		wire = append(append([]byte{}, nonESPMarker...), msg...)
 	}
 	var lastErr error
-	for attempt := 0; attempt <= maxRetransmits; attempt++ {
+	for attempt := 0; attempt <= retransmits; attempt++ {
 		if attempt > 0 {
 			vpnlog.Debug(stage, "retransmitting", vpnlog.Fields{"attempt": attempt})
 		}
@@ -192,7 +256,7 @@ func (s *Session) exchange(ctx context.Context, msg []byte, expectMinLen int) ([
 		default:
 		}
 	}
-	return nil, fmt.Errorf("IKE_TIMEOUT: no response after %d attempts: %v", maxRetransmits+1, lastErr)
+	return nil, fmt.Errorf("IKE_TIMEOUT: %w after %d attempts: %v", ErrNoResponse, retransmits+1, lastErr)
 }
 
 // SendESP sends one already-framed ESP packet (SPI|Seq|IV|ciphertext|ICV,
@@ -363,22 +427,29 @@ func (s *Session) logInformational(h Header, encBody []byte) {
 	}
 }
 
+// buildMM1 is Main Mode's first message, HDR, SA[, VID(NAT-T)] — shared by
+// the real exchange and ProbeResponder (probe.go) so a probe is exactly what connect
+// would send.
+func buildMM1(initiatorSPI [8]byte, sa []byte) []byte {
+	vid := marshalPayload(PayloadNone, RFC3947VendorID())
+	body := append(marshalPayload(PayloadVendorID, sa), vid...)
+	hdr := Header{InitiatorSPI: initiatorSPI, NextPayload: PayloadSA, Version: 0x10, ExchangeType: ExchangeIdentityProt}
+	hdr.Length = uint32(headerLen + len(body))
+	return append(hdr.Marshal(), body...)
+}
+
 func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Transform) error {
 	start := time.Now()
 
-	// --- MM1: HDR, SA[, VID(NAT-T)] ---
-	sa := MarshalSA(transforms)
-	vid := marshalPayload(PayloadNone, RFC3947VendorID())
-	saPayload := marshalPayload(PayloadVendorID, sa)
-	body := append(saPayload, vid...)
-
-	hdr1 := Header{InitiatorSPI: s.InitiatorSPI, NextPayload: PayloadSA, Version: 0x10, ExchangeType: ExchangeIdentityProt}
-	hdr1.Length = uint32(headerLen + len(body))
-	mm1 := append(hdr1.Marshal(), body...)
+	sa := MarshalSA(transforms) // also SAi_b for HASH_I/HASH_R below
+	mm1 := buildMM1(s.InitiatorSPI, sa)
 
 	vpnlog.Info(stage, "MM1 sent (SA proposal)", vpnlog.Fields{"proposals": cfg.Proposals})
-	resp, err := s.exchange(ctx, mm1, headerLen)
+	resp, err := s.exchangeN(ctx, mm1, headerLen, s.mm1RetransmitBudget())
 	if err != nil {
+		if errors.Is(err, ErrNoResponse) {
+			return fmt.Errorf("MM1/MM2: %w: %w", errMM1Unanswered, err)
+		}
 		return fmt.Errorf("MM1/MM2: %w", err)
 	}
 	hdr2, err := ParseHeader(resp)
