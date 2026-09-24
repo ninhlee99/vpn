@@ -81,12 +81,12 @@ func TestReAddKeepsProfileMTU(t *testing.T) {
 	}
 }
 
-func TestVerboseDefaultsOnAndPersists(t *testing.T) {
+func TestVerboseDefaultsOffAndPersists(t *testing.T) {
 	c := &Config{Profiles: map[string]*Profile{}}
-	if !c.EffectiveVerbose() {
-		t.Fatal("detailed logging must be on unless the user turned it off")
+	if c.EffectiveVerbose() {
+		t.Fatal("detailed logging must be off unless the user turned it on")
 	}
-	c.SetVerbose(false)
+	c.SetVerbose(true)
 	data, err := json.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +95,8 @@ func TestVerboseDefaultsOnAndPersists(t *testing.T) {
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatal(err)
 	}
-	if back.EffectiveVerbose() {
-		t.Fatal("an explicit off did not survive a save/load round trip")
+	if !back.EffectiveVerbose() {
+		t.Fatal("an explicit on did not survive a save/load round trip")
 	}
 }
 

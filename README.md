@@ -143,11 +143,11 @@ vpn mtu 1280     # đặt cho tất cả profile (chỉ nhận 1280 hoặc 1400)
 ### Log chi tiết
 
 ```bash
-vpn verbose        # xem: on/off (mặc định on)
-vpn verbose off    # chỉ ghi mốc kết nối + lỗi, bỏ log từng gói tin
+vpn verbose        # xem: on/off (mặc định off)
+vpn verbose on     # ghi thêm chi tiết giao thức khi cần chẩn đoán
 ```
 
-Mốc kết nối (IKE/L2TP/PPP, rekey, "tunnel alive" mỗi phút, sự kiện mạng, lý do rớt) và lỗi luôn được ghi. Bật verbose thì có thêm chi tiết giao thức (bắt tay, retransmit, gói bị bỏ); không bao giờ ghi từng gói dữ liệu, để đỡ ghi SSD. Áp dụng ở lần `connect` tiếp theo; log giới hạn dung lượng (xoay vòng 8 MB, tối đa 16 MB mỗi phiên). Menu bar app có công tắc "Verbose log" cạnh ô MTU.
+Mốc kết nối (IKE/L2TP/PPP, rekey, "tunnel alive" mỗi phút, sự kiện mạng, lý do rớt) và lỗi luôn được ghi. Mặc định tắt; bật verbose thì có thêm chi tiết giao thức (bắt tay, retransmit, gói bị bỏ); không bao giờ ghi từng gói dữ liệu, để đỡ ghi SSD. Áp dụng ở lần `connect` tiếp theo; log giới hạn dung lượng (xoay vòng 8 MB, tối đa 16 MB mỗi phiên). Menu bar app có công tắc "Verbose log" trong Settings (biểu tượng bánh răng).
 
 ### Kill switch (tùy chọn)
 

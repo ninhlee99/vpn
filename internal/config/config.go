@@ -43,7 +43,7 @@ type Config struct {
 	// of a server, so it is one switch rather than one per profile.
 	MTU int `json:"mtu,omitempty"`
 	// Verbose, when set, turns per-packet debug logging on or off for every
-	// connection. Nil means the default (on — see EffectiveVerbose).
+	// connection. Nil means the default (off — see EffectiveVerbose).
 	Verbose *bool `json:"verbose,omitempty"`
 	// KillSwitch, when on, blocks all non-local traffic while a full-tunnel
 	// VPN reconnects instead of letting it flow around the tunnel unprotected.
@@ -93,11 +93,13 @@ func (c *Config) EffectiveMTU(p *Profile) int {
 	return DefaultMTU
 }
 
-// EffectiveVerbose reports whether connections should write per-packet debug
-// logging. On unless the user turned it off: a drop that leaves no trace in
-// the log cannot be diagnosed afterwards, and the log file is size-bounded.
+// EffectiveVerbose reports whether connections should write protocol-level debug
+// logging. Off unless the user turned it on. Connection milestones, errors and
+// the periodic "tunnel alive" line are logged regardless (see internal/vpnlog),
+// so a drop is diagnosable without it; this only adds handshake and
+// retransmit detail.
 func (c *Config) EffectiveVerbose() bool {
-	return c.Verbose == nil || *c.Verbose
+	return c.Verbose != nil && *c.Verbose
 }
 
 // SetVerbose sets the global verbose-logging switch.

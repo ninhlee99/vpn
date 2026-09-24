@@ -87,7 +87,7 @@ Usage:
   vpn profile rename <name> [display name]   change the label shown in the app (empty: back to <name>); the key <name> and its stored secrets are untouched
   vpn account add <profile> <account> [--default] [--password pw]
   vpn mtu [1280|1400]               show / set the tunnel MTU for all profiles (applies on the next connect)
-  vpn verbose [on|off]              show / set detailed per-packet logging for every connection (default on; applies on the next connect)
+  vpn verbose [on|off]              show / set detailed per-packet logging for every connection (default off; applies on the next connect)
   vpn killswitch [on|off]           block all non-local traffic while a full-tunnel VPN reconnects (default off; applies on the next connect)
   vpn diagnose [--profile name] [--server host] [--json]
   vpn connect [--profile name] [--account name] [--timeout 30s] [--verbose] [--force] [--rekey-after 2m]  (always runs in the background)
