@@ -82,7 +82,18 @@ func cmdUpdate(args []string) error {
 	}
 
 	fmt.Printf("Updated to %s.\n", version)
+	if appInstalled() {
+		fmt.Println("This updates the CLI only — to update the TMS VPN menu bar app too, re-run install.sh.")
+	}
 	return nil
+}
+
+// menuBarApp is where install.sh puts the menu bar app.
+const menuBarApp = "/Applications/TMS VPN.app"
+
+func appInstalled() bool {
+	_, err := os.Stat(menuBarApp)
+	return err == nil
 }
 
 // downloadVerified fetches the signed manifest, its signature and the asset
