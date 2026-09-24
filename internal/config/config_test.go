@@ -112,3 +112,20 @@ func TestKillSwitchDefaultsOffAndPersists(t *testing.T) {
 		t.Fatalf("kill switch lost in a save/load round trip: %v %+v", err, back)
 	}
 }
+
+func TestDisplayNameLabelAndSurvivesReAdd(t *testing.T) {
+	p := &Profile{Server: "s"}
+	if got := p.Label("Hinode"); got != "Hinode" {
+		t.Fatalf("no display name: label %q, want the key", got)
+	}
+	c := &Config{Profiles: map[string]*Profile{}}
+	c.AddProfile("Hinode", &Profile{Server: "s", DisplayName: "Office VPN"})
+	if got := c.Profiles["Hinode"].Label("Hinode"); got != "Office VPN" {
+		t.Fatalf("label %q, want the display name", got)
+	}
+	// Editing the server later (profile add again) must not wipe the display name.
+	c.AddProfile("Hinode", &Profile{Server: "s2"})
+	if got := c.Profiles["Hinode"].DisplayName; got != "Office VPN" {
+		t.Fatalf("re-adding the profile lost the display name (%q)", got)
+	}
+}

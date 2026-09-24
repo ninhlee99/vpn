@@ -8,6 +8,7 @@ struct CLIAccount: Codable {
 }
 
 struct CLIProfile: Codable {
+    var display_name: String?
     var server: String?
     var server_id: String?
     var full_tunnel: Bool?
@@ -39,7 +40,11 @@ struct CLIState: Codable {
 
 struct VPNProfileItem: Identifiable, Hashable {
     var id: String { name }
+    /// The profile's key: CLI arguments and Keychain entries use it, so it never changes.
     var name: String
+    /// What the user named it; empty means "same as the key".
+    var displayName: String = ""
+    var title: String { displayName.isEmpty ? name : displayName }
     var server: String
     var username: String
     var isFullTunnel: Bool
@@ -331,6 +336,7 @@ final class VPNManager: ObservableObject {
             for (pName, pVal) in cfg.profiles ?? [:] {
                 items.append(VPNProfileItem(
                     name: pName,
+                    displayName: pVal.display_name ?? "",
                     server: pVal.server ?? "",
                     username: pVal.default_account ?? pVal.accounts?.keys.first ?? "",
                     isFullTunnel: pVal.full_tunnel ?? true,
@@ -338,7 +344,7 @@ final class VPNManager: ObservableObject {
                     isConnecting: isConnecting && activeProf == pName
                 ))
             }
-            update(\.profiles, items.sorted { $0.name.lowercased() < $1.name.lowercased() })
+            update(\.profiles, items.sorted { $0.title.lowercased() < $1.title.lowercased() })
         }
     }
 
@@ -663,9 +669,15 @@ final class VPNManager: ObservableObject {
         }
     }
 
-    func saveProfile(name: String, server: String, user: String, psk: String, password: String, isFullTunnel: Bool, isNew: Bool) {
+    /// `name` is the profile key; `displayName` the label shown in the app (edits only).
+    func saveProfile(name: String, displayName: String? = nil, server: String, user: String, psk: String, password: String, isFullTunnel: Bool, isNew: Bool) {
         let cli = self.cli
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // The label is independent of everything else in the form (which needs the shared
+            // secret re-entered), so it is applied first and on its own.
+            if let displayName = displayName {
+                Self.run(cli, ["profile", "rename", name] + (displayName.isEmpty ? [] : [displayName]))
+            }
             let args = ["profile", "add", name, "--server", server, "--full-tunnel=\(isFullTunnel)"]
             Self.run(cli, args, secret: psk)
 
@@ -900,7 +912,7 @@ struct ProfileCardRow: View {
 
             // Profile Name & Subtitle
             VStack(alignment: .leading, spacing: 2) {
-                Text(profile.name)
+                Text(profile.title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(state == .connected ? .white : (state == .connecting ? Color(red: 1.0, green: 0.9, blue: 0.7) : Color(red: 0.85, green: 0.88, blue: 0.92)))
                     .lineLimit(1)
@@ -969,6 +981,7 @@ struct ProfileCardRow: View {
 struct MenuBarPopupView: View {
     @ObservedObject var vpn = VPNManager.shared
     @State private var showingAddModal = false
+    @State private var showingSettings = false
     @State private var editingProfile: VPNProfileItem?
 
     var body: some View {
@@ -1247,55 +1260,24 @@ struct MenuBarPopupView: View {
 
             Divider().background(Color.white.opacity(0.08)).padding(.top, 12)
 
-            // Settings row: MTU and verbose logging, both global and applied on the next connect.
-            HStack(spacing: 8) {
-                Text("MTU")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.gray.opacity(0.7))
-                Picker("", selection: Binding(get: { vpn.mtu }, set: { vpn.setMTU($0) })) {
-                    Text("1280").tag(1280)
-                    Text("1400").tag(1400)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(width: 100)
-                .help("MTU cho mọi profile. Áp dụng ở lần kết nối tiếp theo. Dùng 1280 nếu mạng hay bị đứng khi tải lớn.")
-
-                Spacer()
-
-                Text("Verbose log")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.gray.opacity(0.7))
-                Toggle("", isOn: Binding(get: { vpn.verbose }, set: { vpn.setVerbose($0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .help("Ghi log chi tiết từng gói tin vào /var/log/vpn.log (xem bằng `vpn logs`). Mặc định bật. Áp dụng ở lần kết nối tiếp theo.")
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
-
-            HStack(spacing: 8) {
-                Text("Kill switch")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(Color.gray.opacity(0.7))
-                Toggle("", isOn: Binding(get: { vpn.killSwitch }, set: { vpn.setKillSwitch($0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .help("Khi mất kết nối VPN (full tunnel), chặn toàn bộ internet cho tới khi kết nối lại thay vì để traffic đi thẳng không được bảo vệ. Nếu bị kẹt: tắt VPN hoặc chạy `vpn repair`. Áp dụng ở lần kết nối tiếp theo.")
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 6)
-
-            // Footer Bar (Clean, NO Settings button)
+            // Footer bar: settings (MTU, logging, kill switch) open in a sheet like the profile form.
             HStack {
                 Text("TMS VPN Client")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.gray.opacity(0.7))
 
                 Spacer()
+
+                Button(action: { showingSettings = true }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 13))
+                        .foregroundColor(Color(red: 0.7, green: 0.74, blue: 0.8))
+                        .padding(5)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
+                .padding(.trailing, 6)
 
                 Button(action: { NSApplication.shared.terminate(nil) }) {
                     HStack(spacing: 5) {
@@ -1314,6 +1296,9 @@ struct MenuBarPopupView: View {
         .background(Color(red: 0.07, green: 0.09, blue: 0.12))
         .animation(.easeInOut(duration: 0.3), value: state)
         .animation(.easeInOut(duration: 0.25), value: vpn.activeAlert)
+        .sheet(isPresented: $showingSettings) {
+            SettingsSheet(isPresented: $showingSettings)
+        }
         .sheet(isPresented: $showingAddModal) {
             ProfileFormSheet(isPresented: $showingAddModal, initialProfile: nil)
         }
@@ -1387,6 +1372,108 @@ struct CleanDarkSecureField: View {
     }
 }
 
+// MARK: - Settings Sheet
+
+/// One settings card: title + explanation on the left, the control on the right —
+/// the same look as the "Send all traffic over VPN" card in the profile form.
+struct SettingCard<Control: View>: View {
+    var title: String
+    var detail: String
+    @ViewBuilder var control: () -> Control
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color(red: 0.88, green: 0.92, blue: 0.96))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundColor(Color.gray)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            control()
+        }
+        .padding(11)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white.opacity(0.04))
+        )
+    }
+}
+
+/// Global settings, applied by the CLI on the next connect.
+struct SettingsSheet: View {
+    @Binding var isPresented: Bool
+    @ObservedObject var vpn = VPNManager.shared
+
+    private let tint = Color(red: 0.2, green: 0.85, blue: 0.95)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Settings")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.white)
+                Spacer()
+                Button(action: { isPresented = false }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(Color.gray.opacity(0.7))
+                        .font(.system(size: 16))
+                }
+                .buttonStyle(.plain)
+            }
+
+            SettingCard(
+                title: "MTU",
+                detail: "Packet size for every profile. Use 1280 if transfers stall on hotspots or PPPoE."
+            ) {
+                Picker("", selection: Binding(get: { vpn.mtu }, set: { vpn.setMTU($0) })) {
+                    Text("1280").tag(1280)
+                    Text("1400").tag(1400)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 110)
+            }
+
+            SettingCard(
+                title: "Verbose log",
+                detail: "Detailed protocol logging to /var/log/vpn.log (view with `vpn logs`). Milestones and errors are always logged."
+            ) {
+                Toggle("", isOn: Binding(get: { vpn.verbose }, set: { vpn.setVerbose($0) }))
+                    .toggleStyle(SwitchToggleStyle(tint: tint))
+                    .labelsHidden()
+            }
+
+            SettingCard(
+                title: "Kill switch",
+                detail: "If a full-tunnel VPN drops, block internet traffic until it reconnects instead of letting it leak. If stuck, turn the VPN off or run `vpn repair`."
+            ) {
+                Toggle("", isOn: Binding(get: { vpn.killSwitch }, set: { vpn.setKillSwitch($0) }))
+                    .toggleStyle(SwitchToggleStyle(tint: tint))
+                    .labelsHidden()
+            }
+
+            Text("Changes apply on the next connection.")
+                .font(.system(size: 10))
+                .foregroundColor(Color.gray)
+
+            HStack {
+                Spacer()
+                Button("Done") { isPresented = false }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(PrimaryButtonStyle())
+            }
+            .padding(.top, 2)
+        }
+        .padding(22)
+        .frame(width: 380)
+        .background(Color(red: 0.08, green: 0.1, blue: 0.14))
+    }
+}
+
 struct ProfileFormSheet: View {
     @Binding var isPresented: Bool
     var initialProfile: VPNProfileItem?
@@ -1419,7 +1506,7 @@ struct ProfileFormSheet: View {
                 Text("Display name")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundColor(Color(red: 0.2, green: 0.85, blue: 0.95))
-                CleanDarkTextField(placeholder: "Required", text: $name, isDisabled: isEdit)
+                CleanDarkTextField(placeholder: "Required", text: $name)
             }
 
             VStack(alignment: .leading, spacing: 5) {
@@ -1486,7 +1573,8 @@ struct ProfileFormSheet: View {
                           !server.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                     
                     VPNManager.shared.saveProfile(
-                        name: name.trimmingCharacters(in: .whitespaces),
+                        name: initialProfile?.name ?? name.trimmingCharacters(in: .whitespaces),
+                        displayName: isEdit ? name.trimmingCharacters(in: .whitespaces) : nil,
                         server: server.trimmingCharacters(in: .whitespaces),
                         user: user.trimmingCharacters(in: .whitespaces),
                         psk: psk,
@@ -1506,7 +1594,7 @@ struct ProfileFormSheet: View {
         .background(Color(red: 0.08, green: 0.1, blue: 0.14))
         .onAppear {
             if let p = initialProfile {
-                name = p.name
+                name = p.title
                 server = p.server
                 user = p.username
                 isFullTunnel = p.isFullTunnel

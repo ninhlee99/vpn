@@ -21,6 +21,10 @@ type Account struct {
 // Profile is one VPN server configuration, independent of which account is
 // currently used to connect to it.
 type Profile struct {
+	// DisplayName is the label shown to the user; empty means the profile's
+	// key. The key itself never changes: Keychain entries (PSK, passwords) are
+	// filed under it, so renaming the key would orphan every stored secret.
+	DisplayName    string              `json:"display_name,omitempty"`
 	Server         string              `json:"server"`
 	ServerID       string              `json:"server_id,omitempty"`
 	IKEProposals   []string            `json:"ike_proposals,omitempty"`
@@ -201,6 +205,14 @@ func (c *Config) Profile(name string) (string, *Profile, error) {
 	return name, p, nil
 }
 
+// Label is what to call this profile in the UI: its display name, else its key.
+func (p *Profile) Label(key string) string {
+	if p != nil && p.DisplayName != "" {
+		return p.DisplayName
+	}
+	return key
+}
+
 // Account looks up an account on a profile by name, or the profile's default
 // when name is "".
 func (p *Profile) Account(name string) (string, *Account, error) {
@@ -243,6 +255,9 @@ func (c *Config) AddProfile(name string, p *Profile) (updated bool) {
 		}
 		if p.MTU == 0 {
 			p.MTU = old.MTU
+		}
+		if p.DisplayName == "" {
+			p.DisplayName = old.DisplayName
 		}
 	}
 	if len(p.IKEProposals) == 0 {

@@ -84,6 +84,7 @@ Usage:
   vpn profile add <name> --server <host> [--server-id id] [--mtu n] [--full-tunnel] [--psk key]
   vpn profile list                  (* = active profile / default account)
   vpn profile remove <name>
+  vpn profile rename <name> [display name]   change the label shown in the app (empty: back to <name>); the key <name> and its stored secrets are untouched
   vpn account add <profile> <account> [--default] [--password pw]
   vpn mtu [1280|1400]               show / set the tunnel MTU for all profiles (applies on the next connect)
   vpn verbose [on|off]              show / set detailed per-packet logging for every connection (default on; applies on the next connect)
@@ -137,7 +138,7 @@ func flagsFirst(args []string, valueFlags map[string]bool) []string {
 
 func cmdProfile(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: vpn profile <add|list|remove> ...")
+		return fmt.Errorf("usage: vpn profile <add|list|remove|rename> ...")
 	}
 	switch args[0] {
 	case "add":
@@ -146,9 +147,37 @@ func cmdProfile(args []string) error {
 		return cmdProfileList(args[1:])
 	case "remove":
 		return cmdProfileRemove(args[1:])
+	case "rename":
+		return cmdProfileRename(args[1:])
 	default:
 		return fmt.Errorf("unknown `profile` subcommand %q", args[0])
 	}
+}
+
+// cmdProfileRename sets a profile's display name. The profile key stays put:
+// the PSK and account passwords are filed in Keychain under it.
+func cmdProfileRename(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: vpn profile rename <name> [display name]")
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	key := args[0]
+	p, ok := cfg.Profiles[key]
+	if !ok {
+		return fmt.Errorf("unknown VPN profile %q", key)
+	}
+	p.DisplayName = strings.TrimSpace(strings.Join(args[1:], " "))
+	if p.DisplayName == key {
+		p.DisplayName = ""
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	fmt.Printf("Profile %q is now shown as %q.\n", key, p.Label(key))
+	return nil
 }
 
 func cmdProfileAdd(args []string) error {
@@ -329,7 +358,11 @@ func formatProfile(name string, p *config.Profile, active bool) string {
 		tunnel = "split tunnel"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s %s  server=%s  %s\n", marker, name, p.Server, tunnel)
+	label := name
+	if p.DisplayName != "" {
+		label = fmt.Sprintf("%s (%s)", p.DisplayName, name)
+	}
+	fmt.Fprintf(&b, "%s %s  server=%s  %s\n", marker, label, p.Server, tunnel)
 	accounts := make([]string, 0, len(p.Accounts))
 	for a := range p.Accounts {
 		accounts = append(accounts, a)
