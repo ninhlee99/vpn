@@ -196,7 +196,7 @@ bun install && bun run dev                          # prototype giao diện — 
 Release được tạo khi push tag semver, sau khi CI pass:
 
 ```bash
-git tag v0.4.3 && git push origin v0.4.3   # bản mới nhất hiện tại: v0.4.2
+git tag v0.4.4 && git push origin v0.4.4   # bản mới nhất hiện tại: v0.4.4
 ```
 
 Mỗi release gồm `vpn-darwin-arm64`, `vpn-darwin-amd64`, `TMS-VPN.app.zip`, `SHA256SUMS` và `SHA256SUMS.sig` (chữ ký ed25519). `vpn update` từ chối release nếu chữ ký hoặc SHA-256 không khớp, hoặc version không mới hơn bản đang chạy (`--force` để bỏ qua).
