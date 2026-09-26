@@ -17,6 +17,14 @@ VPN client L2TP/IPsec thuần macOS — không phụ thuộc strongSwan, xl2tpd,
 
 ## Cài đặt
 
+**Cài đặt tự động (tự nhận diện chip Apple Silicon M1/M2/M3... hoặc Mac Intel 2017+):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install.sh | bash
+```
+
+Hoặc cài đặt chỉ định theo từng kiến trúc:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-arm64.sh | bash   # Apple Silicon (M1/M2/M3...)
 curl -fsSL https://raw.githubusercontent.com/tms-ninhle/vpn/main/install-intel.sh | bash   # Mac Intel

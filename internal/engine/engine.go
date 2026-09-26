@@ -64,8 +64,8 @@ var errAbortedByDisconnect = errors.New("connect aborted: disconnected while neg
 // lost afterwards (the data plane stopped). Everything it had changed is
 // already restored; Connect answers by reconnecting.
 type tunnelDropped struct {
-	cause       error
-	uptime      time.Duration
+	cause  error
+	uptime time.Duration
 	// stale identifies the LNS-side session of the tunnel that was just lost:
 	// when the network died first, we never told the server to close it, and it
 	// would keep the account "already logged in" until its own echo timeout.
@@ -745,13 +745,13 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 			}
 			cur := sas.current()
 			vpnlog.Info("ENGINE", "tunnel alive", vpnlog.Fields{
-				"uptime":        time.Since(connectedAt).Round(time.Second).String(),
-				"rx_packets":    live.rx.Load(),
-				"tx_packets":    live.tx.Load(),
-				"esp_in_spi":    fmt.Sprintf("%08x", cur.in.SPI),
-				"esp_out_spi":   fmt.Sprintf("%08x", cur.out.SPI),
+				"uptime":         time.Since(connectedAt).Round(time.Second).String(),
+				"rx_packets":     live.rx.Load(),
+				"tx_packets":     live.tx.Load(),
+				"esp_in_spi":     fmt.Sprintf("%08x", cur.in.SPI),
+				"esp_out_spi":    fmt.Sprintf("%08x", cur.out.SPI),
 				"esp_expires_in": time.Until(cur.expires).Round(time.Second).String(),
-				"ike_age":       mux.current().Age().Round(time.Second).String(),
+				"ike_age":        mux.current().Age().Round(time.Second).String(),
 			})
 		}
 		if err := watchdog(dpCtx, keepaliveEvery, deadAfter, live, probe, report); err != nil {
