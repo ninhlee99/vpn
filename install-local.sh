@@ -9,10 +9,12 @@ else
     OWNER_UID="$(stat -f '%u' /dev/console 2>/dev/null || echo 501)"
 fi
 
-echo "🚀 [1/3] Làm sạch và biên dịch Menu Bar App + Go CLI..."
+echo "🚀 [1/3] Làm sạch và biên dịch Menu Bar App + Go CLI (Universal: Intel x86_64 + ARM64)..."
 sudo rm -rf ./build
 ./build.sh
-go build -o ./build/vpn ./cmd/vpn
+GOOS=darwin GOARCH=arm64 go build -o ./build/vpn-arm64 ./cmd/vpn
+GOOS=darwin GOARCH=amd64 go build -o ./build/vpn-amd64 ./cmd/vpn
+lipo -create ./build/vpn-arm64 ./build/vpn-amd64 -output ./build/vpn
 
 echo "📦 [2/3] Cài đặt CLI Engine (/usr/local/bin/vpn)..."
 sudo install -o root -g wheel -m 4755 ./build/vpn /usr/local/bin/vpn
