@@ -64,12 +64,13 @@ var errAbortedByDisconnect = errors.New("connect aborted: disconnected while neg
 // lost afterwards (the data plane stopped). Everything it had changed is
 // already restored; Connect answers by reconnecting.
 type tunnelDropped struct {
-	cause  error
-	uptime time.Duration
+	cause       error
+	uptime      time.Duration
 	// stale identifies the LNS-side session of the tunnel that was just lost:
 	// when the network died first, we never told the server to close it, and it
 	// would keep the account "already logged in" until its own echo timeout.
-	stale *staleSession
+	stale       *staleSession
+	lastLocalIP net.IP
 }
 
 func (e *tunnelDropped) Error() string {
@@ -187,6 +188,7 @@ func Connect(cfg Config) error {
 		authRejects  int
 		negRetries   int           // first-connect negotiation timeouts retried so far
 		stale        *staleSession // the last dropped tunnel's server-side session, until a new one replaces it
+		lastLocalIP  net.IP        // retain assigned IP address across reconnects
 		blocked      bool          // a kill-switch hold may have left blackhole routes that only we can remove
 	)
 	// A session an earlier run could not close (killed daemon, crash, reboot)
@@ -206,7 +208,7 @@ func Connect(cfg Config) error {
 		// While retries remain, a failed first attempt is recorded as CONNECTING
 		// (not FAILED), so the UI keeps showing progress instead of an alert.
 		quiet := !reconnecting && negRetries < maxNegotiationRetries
-		err := connectOnce(sigCtx, cfg, reconnecting, reconnects, quiet, stale)
+		err := connectOnce(sigCtx, cfg, reconnecting, reconnects, quiet, stale, lastLocalIP)
 		if err == nil {
 			return nil // disconnected on request
 		}
@@ -217,6 +219,9 @@ func Connect(cfg Config) error {
 		case errors.As(err, &dropped):
 			reconnecting = true
 			stale = dropped.stale
+			if dropped.lastLocalIP != nil {
+				lastLocalIP = dropped.lastLocalIP
+			}
 			blocked = blocked || (cfg.KillSwitch && cfg.FullTunnel)
 			reconnects++
 			authRejects = 0
@@ -293,7 +298,7 @@ func finalFailure(cfg Config, ce *connectError) error {
 // neither of which requires root once open, so there's no reason for the
 // process to keep holding root through what's normally the vast majority
 // of a session's lifetime.
-func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int, quiet bool, stale *staleSession) error {
+func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int, quiet bool, stale *staleSession, requestedIP net.IP) error {
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server, Reconnecting: reconnecting, Reconnects: reconnects}
 	var connectedAt time.Time
 
@@ -557,7 +562,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		if mru == 0 {
 			mru = 1280
 		}
-		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
+		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, RequestedIP: requestedIP, Timeout: cfg.Timeout})
 		if err != nil {
 			l2tpTun.Close()
 			restoreRoutes()
@@ -821,7 +826,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 			_ = dropping.Save()
 			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr, "exposure": exposure})
 			pt, ps := l2tpTun.PeerIDs()
-			return &tunnelDropped{cause: pumpErr, uptime: uptime, stale: &staleSession{tunnel: pt, session: ps}}
+			return &tunnelDropped{cause: pumpErr, uptime: uptime, stale: &staleSession{tunnel: pt, session: ps}, lastLocalIP: ipcp.LocalIP}
 		}
 		clearLastSession() // closed properly: nothing left on the server to end
 		_ = state.Clear()

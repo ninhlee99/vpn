@@ -3,6 +3,7 @@ package ppp
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"vpn/internal/vpnlog"
@@ -21,10 +22,11 @@ type Transport interface {
 
 // Config is what the engine supplies to bring up one PPP session.
 type Config struct {
-	MRU      uint16
-	Username string
-	Password string
-	Timeout  time.Duration
+	MRU         uint16
+	Username    string
+	Password    string
+	RequestedIP net.IP
+	Timeout     time.Duration
 }
 
 // Result is everything the engine needs once PPP reaches the OPENED state.
@@ -62,7 +64,7 @@ func Run(ctx context.Context, t Transport, cfg Config) (*Result, error) {
 	}
 	vpnlog.Info(stage, "MS-CHAPv2 authentication succeeded", nil)
 
-	ipcp, err := runIPCP(ctx, t)
+	ipcp, err := runIPCP(ctx, t, cfg.RequestedIP)
 	if err != nil {
 		return nil, fmt.Errorf("IPCP_FAILURE: %w", err)
 	}
@@ -241,7 +243,7 @@ func runLCP(ctx context.Context, t Transport, cfg LCPConfig) (uint32, error) {
 	return magicOf(ourOptions), nil
 }
 
-func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
+func runIPCP(ctx context.Context, t Transport, requestedIP net.IP) (*NegotiatedIPCP, error) {
 	result := &NegotiatedIPCP{}
 	// handlePeerConfigureRequest ACKs the LNS's own Configure-Request
 	// unmodified, and separately records its IP-Address option as PeerIP
@@ -251,7 +253,7 @@ func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
 	// negotiatePhase's returned ourOptions below, not from the peer's
 	// Configure-Request.
 	ourOptions, err := negotiatePhase(ctx, t, ProtoIPCP,
-		RequestIPCPOptions,
+		func() []Option { return RequestIPCPOptions(requestedIP) },
 		func(opts []Option) ([]Option, bool) {
 			for _, o := range opts {
 				result.ApplyPeerOption(o)

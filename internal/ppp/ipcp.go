@@ -23,13 +23,17 @@ func IPv4Option(optType uint8, ip net.IP) Option {
 	return Option{Type: optType, Data: append([]byte{}, v4...)}
 }
 
-// RequestIPCPOptions builds this client's IPCP Configure-Request: IP
-// address 0.0.0.0 (meaning "assign me one", matching
+// RequestIPCPOptions builds this client's IPCP Configure-Request: requested IP
+// address (or 0.0.0.0 meaning "assign me one", matching
 // `ipcp-accept-local`/`ipcp-accept-remote` in the reference PPP options)
 // plus a request for the LNS to supply DNS servers.
-func RequestIPCPOptions() []Option {
+func RequestIPCPOptions(requestedIP net.IP) []Option {
+	ip := net.IPv4zero
+	if requestedIP != nil && !requestedIP.IsUnspecified() && requestedIP.To4() != nil {
+		ip = requestedIP.To4()
+	}
 	return []Option{
-		IPv4Option(IPCPOptIPAddress, net.IPv4zero),
+		IPv4Option(IPCPOptIPAddress, ip),
 		IPv4Option(IPCPOptPrimaryDNS, net.IPv4zero),
 		IPv4Option(IPCPOptSecondaryDNS, net.IPv4zero),
 	}
