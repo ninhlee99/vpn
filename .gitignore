@@ -13,3 +13,4 @@ coverage/
 benchmark_report.json
 safe_test_report.md
 *.html
+scripts/
