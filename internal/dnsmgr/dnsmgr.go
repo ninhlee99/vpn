@@ -1,7 +1,12 @@
-// Package dnsmgr captures and restores the DNS servers configured on the
-// active network service, via the `networksetup` system tool (the only
-// documented way to change per-service DNS on macOS without touching
-// SystemConfiguration internals directly).
+// Package dnsmgr configures and restores DNS servers for the VPN session dynamically
+// using macOS scutil DynamicStore (in-memory only).
+//
+// By using in-memory DynamicStore keys (State:/Network/Service/.../DNS), macOS routes
+// DNS queries to the VPN DNS servers while the tunnel is active, without writing to
+// /Library/Preferences/SystemConfiguration/preferences.plist.
+//
+// This guarantees that if the Mac abruptly powers off, reboots, or loses power while
+// connected, no stale DNS settings are ever left in macOS Network Preferences upon reboot.
 package dnsmgr
 
 import (
@@ -12,11 +17,18 @@ import (
 	"vpn/internal/sysbin"
 )
 
-// Snapshot is the pre-VPN DNS configuration for one network service.
+const (
+	vpnServiceID = "com.tms.vpn.dns"
+	dnsStateKey  = "State:/Network/Service/" + vpnServiceID + "/DNS"
+	ipv4StateKey = "State:/Network/Global/IPv4"
+)
+
+// Snapshot is the DNS configuration state for the VPN session.
 type Snapshot struct {
-	Service string
-	Servers []string // empty means "Empty" (DHCP-assigned), not "no snapshot"
-	applied bool
+	Service  string
+	Servers  []string
+	applied  bool
+	TunIface string
 }
 
 // ServiceForInterface maps a BSD interface name (e.g. "en0") to the
@@ -44,53 +56,89 @@ func ServiceForInterface(iface string) (string, error) {
 
 // Capture reads the current DNS servers for service.
 func Capture(service string) (*Snapshot, error) {
-	out, err := exec.Command(sysbin.Networksetup, "-getdnsservers", service).Output()
-	if err != nil {
-		return nil, fmt.Errorf("read DNS servers for %s: %w", service, err)
-	}
-	text := strings.TrimSpace(string(out))
 	s := &Snapshot{Service: service}
-	if text != "" && !strings.Contains(text, "aren't any DNS Servers") {
-		s.Servers = strings.Fields(text)
+	out, err := exec.Command(sysbin.Networksetup, "-getdnsservers", service).Output()
+	if err == nil {
+		text := strings.TrimSpace(string(out))
+		if text != "" && !strings.Contains(text, "aren't any DNS Servers") {
+			s.Servers = strings.Fields(text)
+		}
 	}
 	return s, nil
 }
 
-// FromRecorded rebuilds a Snapshot from state previously persisted to disk
-// (see internal/state.State's DNS* fields) — used by disconnect/repair when
-// they're a separate process invocation from the one that called Apply, so
-// they have no live *Snapshot to call Restore on.
+// FromRecorded rebuilds a Snapshot from state previously persisted to disk.
 func FromRecorded(service string, servers []string, applied bool) *Snapshot {
 	return &Snapshot{Service: service, Servers: servers, applied: applied}
 }
 
-// Apply sets the service's DNS servers to those pushed by the VPN server. An
-// empty list is a no-op (the goal is never to silently hand out public DNS
-// the server didn't provide).
+// Apply sets DNS servers dynamically via scutil DynamicStore (in-memory only).
 func (s *Snapshot) Apply(servers []string) error {
 	if len(servers) == 0 {
 		return nil
 	}
-	args := append([]string{"-setdnsservers", s.Service}, servers...)
-	if out, err := exec.Command(sysbin.Networksetup, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("set DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
+	var script strings.Builder
+	script.WriteString("d.init\n")
+	script.WriteString(fmt.Sprintf("d.add ServerAddresses * %s\n", strings.Join(servers, " ")))
+	script.WriteString("d.add SupplementalMatchDomains * \"\"\n")
+	if s.TunIface != "" {
+		script.WriteString(fmt.Sprintf("d.add InterfaceName %s\n", s.TunIface))
+	}
+	script.WriteString(fmt.Sprintf("set %s\n", dnsStateKey))
+	script.WriteString("d.init\n")
+	script.WriteString(fmt.Sprintf("d.add PrimaryService %s\n", vpnServiceID))
+	script.WriteString(fmt.Sprintf("d.add Services * %s\n", vpnServiceID))
+	script.WriteString(fmt.Sprintf("set %s\n", ipv4StateKey))
+
+	cmd := exec.Command(sysbin.Scutil)
+	cmd.Stdin = strings.NewReader(script.String())
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("apply dynamic DNS via scutil: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	s.applied = true
 	return nil
 }
 
-// Restore puts the service's DNS back exactly as captured — "Empty" restores
-// DHCP-assigned DNS rather than hard-coding anything.
+// Restore removes the dynamic scutil DNS keys and cleans any legacy networksetup DNS.
 func (s *Snapshot) Restore() error {
-	if !s.applied {
-		return nil
-	}
-	args := []string{"-setdnsservers", s.Service, "Empty"}
-	if len(s.Servers) > 0 {
-		args = append([]string{"-setdnsservers", s.Service}, s.Servers...)
-	}
-	if out, err := exec.Command(sysbin.Networksetup, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("restore DNS servers on %s: %w (%s)", s.Service, err, strings.TrimSpace(string(out)))
+	var script strings.Builder
+	script.WriteString(fmt.Sprintf("remove %s\n", dnsStateKey))
+	script.WriteString(fmt.Sprintf("remove %s\n", ipv4StateKey))
+
+	cmd := exec.Command(sysbin.Scutil)
+	cmd.Stdin = strings.NewReader(script.String())
+	_ = cmd.Run()
+
+	// Clean up any legacy persistent DNS left on the Wi-Fi/Ethernet service by previous versions
+	if s.Service != "" {
+		out, err := exec.Command(sysbin.Networksetup, "-getdnsservers", s.Service).Output()
+		if err == nil {
+			text := strings.TrimSpace(string(out))
+			if text != "" && !strings.Contains(text, "aren't any DNS Servers") {
+				_ = exec.Command(sysbin.Networksetup, "-setdnsservers", s.Service, "Empty").Run()
+			}
+		}
 	}
 	return nil
+}
+
+// CleanPersistentSettings removes any leftover persistent DNS settings from all network services.
+func CleanPersistentSettings() {
+	out, err := exec.Command(sysbin.Networksetup, "-listallnetworkservices").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		svc := strings.TrimSpace(line)
+		if svc == "" || strings.Contains(svc, "*") {
+			continue
+		}
+		cur, err := exec.Command(sysbin.Networksetup, "-getdnsservers", svc).Output()
+		if err == nil {
+			text := strings.TrimSpace(string(cur))
+			if text != "" && !strings.Contains(text, "aren't any DNS Servers") {
+				_ = exec.Command(sysbin.Networksetup, "-setdnsservers", svc, "Empty").Run()
+			}
+		}
+	}
 }

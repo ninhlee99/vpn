@@ -101,11 +101,11 @@ func negotiatePhase(
 		return nil, err
 	}
 
-	retransmit := time.NewTicker(3 * time.Second)
+	retransmit := time.NewTicker(800 * time.Millisecond)
 	defer retransmit.Stop()
 
 	for !ourAcked || !peerAcked {
-		frameCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		frameCtx, cancel := context.WithTimeout(ctx, 800*time.Millisecond)
 		proto, payload, err := t.RecvFrame(frameCtx)
 		cancel()
 		if err != nil {
@@ -281,14 +281,14 @@ func runIPCP(ctx context.Context, t Transport) (*NegotiatedIPCP, error) {
 // exactly that: disconnect immediately followed by connect failed with
 // PPP_AUTH_FAILURE even though the credentials never changed.
 func Terminate(t Transport, id uint8) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	req := ControlPacket{Code: CodeTerminateRequest, Identifier: id}
 	if err := t.SendFrame(ProtoLCP, req.Marshal()); err != nil {
 		return
 	}
 	for {
-		frameCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		frameCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 		proto, payload, err := t.RecvFrame(frameCtx)
 		cancel()
 		if err != nil {

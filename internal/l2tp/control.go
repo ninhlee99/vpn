@@ -20,7 +20,7 @@ type Transport interface {
 }
 
 const (
-	retransmitInterval = 2 * time.Second
+	retransmitInterval = 800 * time.Millisecond
 	maxRetransmits     = 5
 )
 
@@ -164,7 +164,7 @@ func (tun *Tunnel) doIncomingCall(ctx context.Context) error {
 // 2661 §5.11/5.6), best-effort — a failure here just means the LNS's own
 // idle timeout will clean up the stale session/tunnel instead.
 func (tun *Tunnel) Close() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 	cdn := concatAVPs(MessageTypeAVP(MsgCDN))
 	_ = tun.sendReliableNoReply(ctx, cdn)
@@ -176,6 +176,11 @@ func (tun *Tunnel) Close() {
 // what it expects in the header of every message we send it.
 func (tun *Tunnel) PeerIDs() (tunnelID, sessionID uint16) {
 	return tun.peerTunnelID, tun.peerSessionID
+}
+
+// Transport returns the underlying data plane transport.
+func (tun *Tunnel) Transport() Transport {
+	return tun.t
 }
 
 // SendDataTo sends one PPP frame in an L2TP data message addressed to an

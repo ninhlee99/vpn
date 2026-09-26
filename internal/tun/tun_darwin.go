@@ -76,6 +76,10 @@ func Open() (*Device, error) {
 		return nil, err
 	}
 
+	// Maximize socket buffer sizes (8MB - macOS kernel maxsockbuf limit) to prevent buffer drops under Gigabit throughput.
+	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, 8*1024*1024)
+	_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_SNDBUF, 8*1024*1024)
+
 	return &Device{fd: fd, Name: name}, nil
 }
 

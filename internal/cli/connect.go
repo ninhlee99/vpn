@@ -135,7 +135,7 @@ func startDaemon(args []string) (*exec.Cmd, error) {
 func awaitOutcome(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(30 * time.Millisecond)
 		st, err := state.Load()
 		if err != nil {
 			continue
@@ -336,7 +336,9 @@ func cmdLogs(args []string) error {
 // (fewer threads to wake and keep resident), and a GC that runs a little
 // earlier keeps the resident heap small instead of letting it drift up.
 func tuneDaemonRuntime() {
-	runtime.GOMAXPROCS(2)
-	debug.SetGCPercent(50)
-	debug.SetMemoryLimit(64 << 20) // soft: makes the GC work harder near it, never fails an allocation
+	if n := runtime.NumCPU(); n > 4 {
+		runtime.GOMAXPROCS(4)
+	}
+	debug.SetGCPercent(100)
+	debug.SetMemoryLimit(256 << 20)
 }

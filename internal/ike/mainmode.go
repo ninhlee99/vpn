@@ -151,6 +151,8 @@ func establishPhase1To(ctx context.Context, cfg Config, serverPort int) (*Sessio
 			return nil, lastErr
 		}
 		sess := &Session{conn: conn, serverIP: serverAddr.IP, destAddr: serverAddr, LocalIP: cfg.LocalIP, floatAnyPort: cfg.Reauth}
+		_ = conn.SetReadBuffer(8 * 1024 * 1024)
+		_ = conn.SetWriteBuffer(8 * 1024 * 1024)
 		if !last {
 			// Leave time for the fallback inside the caller's connect timeout.
 			sess.mm1Retransmits = firstPortMM1Retransmits
@@ -215,31 +217,68 @@ func (s *Session) mm1RetransmitBudget() int {
 	return maxRetransmits
 }
 
+// calcRetransmitInterval returns an adaptive backoff interval starting faster (1s, 2s, 3s)
+// while respecting any shortened test intervals.
+func calcRetransmitInterval(attempt int) time.Duration {
+	if retransmitInterval < time.Second {
+		return retransmitInterval
+	}
+	switch attempt {
+	case 0:
+		return 1 * time.Second
+	case 1:
+		return 2 * time.Second
+	default:
+		return retransmitInterval
+	}
+}
+
 // exchangeN is exchange with an explicit retransmit budget.
 func (s *Session) exchangeN(ctx context.Context, msg []byte, expectMinLen, retransmits int) ([]byte, error) {
 	wire := msg
 	if s.floated {
 		wire = append(append([]byte{}, nonESPMarker...), msg...)
 	}
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = s.conn.SetReadDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+
 	var lastErr error
 	for attempt := 0; attempt <= retransmits; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if attempt > 0 {
 			vpnlog.Debug(stage, "retransmitting", vpnlog.Fields{"attempt": attempt})
 		}
 		if _, err := s.conn.WriteToUDP(wire, s.destAddr); err != nil {
 			return nil, fmt.Errorf("send: %w", err)
 		}
-		deadline := time.Now().Add(retransmitInterval)
+		interval := calcRetransmitInterval(attempt)
+		deadline := time.Now().Add(interval)
 		for {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
-				lastErr = fmt.Errorf("no reply within %s", retransmitInterval)
+				lastErr = fmt.Errorf("no reply within %s", interval)
 				break
 			}
 			s.conn.SetReadDeadline(deadline)
 			buf := make([]byte, 65535)
 			n, from, err := s.conn.ReadFromUDP(buf)
 			if err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				lastErr = err
 				break
 			}
@@ -513,8 +552,8 @@ func (s *Session) runMainMode(ctx context.Context, cfg Config, transforms []Tran
 		return fmt.Errorf("IKE_PROPOSAL_MISMATCH: server chose a transform we never offered (encryption %d, %d-bit key, hash %d, group %d)", chosen.Encryption, cipherKeyLen(chosen)*8, chosen.Hash, chosen.Group)
 	}
 	s.Transform = chosen
-	vpnlog.Info(stage, "MM2 received (server chose transform)", vpnlog.Fields{
-		"encryption": chosen.Encryption, "hash": chosen.Hash, "group": chosen.Group, "nat_t_vendor": peerSupportsNATT,
+	vpnlog.Info(stage, "MM2 received (server agreed on IKE proposal)", vpnlog.Fields{
+		"transform": chosen.String(), "nat_t_detected": peerSupportsNATT,
 	})
 
 	// --- MM3: HDR, KE, Nonce[, NAT-D, NAT-D] ---
@@ -719,6 +758,8 @@ func (s *Session) floatToNATT(localIP net.IP) error {
 	if err != nil {
 		return fmt.Errorf("bind local UDP/%d for NAT-T on %s: %w", natTLocalPort, localIP, err)
 	}
+	_ = conn.SetReadBuffer(8 * 1024 * 1024)
+	_ = conn.SetWriteBuffer(8 * 1024 * 1024)
 	oldConn := s.conn
 	s.conn = conn
 	s.destAddr = &net.UDPAddr{IP: s.serverIP, Port: natTServerPort}

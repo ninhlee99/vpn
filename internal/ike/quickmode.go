@@ -614,8 +614,8 @@ func (s *Session) quickMode(espProposals []string, localIP, remoteIP net.IP, rou
 	if !offeredESP(chosen.Transform, transforms) {
 		return nil, fmt.Errorf("IPSEC_FAILURE: responder chose an ESP transform we never offered (encryption %d, %d-bit key, hash %d)", chosen.Transform.Encryption, cipherKeyLen(chosen.Transform)*8, chosen.Transform.Hash)
 	}
-	vpnlog.Info(stage, "ESP transform negotiated", vpnlog.Fields{
-		"encryption": chosen.Transform.Encryption, "key_bits": cipherKeyLen(chosen.Transform) * 8, "hash": chosen.Transform.Hash,
+	vpnlog.Info(stage, "QM2 received (ESP transform agreed)", vpnlog.Fields{
+		"transform": chosen.Transform.String(),
 	})
 
 	// QM3: HDR*, HASH(3) — acknowledges completion, RFC 2409 §5.5.
