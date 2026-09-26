@@ -163,3 +163,103 @@ func TestESPConcurrentEncryptUniqueSequence(t *testing.T) {
 		seen[s] = true
 	}
 }
+
+func TestESPEncryptIPPacketMatchesDecryptedPayload(t *testing.T) {
+	for _, s := range suites {
+		t.Run(s.String(), func(t *testing.T) {
+			out, in := s.pair(t)
+			ipPayload := []byte("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+			pkt, err := out.EncryptIPPacket(1234, 5678, ipPayload)
+			if err != nil {
+				t.Fatalf("EncryptIPPacket failed: %v", err)
+			}
+			decrypted, nextHeader, err := in.Decrypt(pkt)
+			if err != nil {
+				t.Fatalf("Decrypt failed: %v", err)
+			}
+			if nextHeader != 17 {
+				t.Fatalf("expected protoUDP (17), got %d", nextHeader)
+			}
+			if len(decrypted) < 16+len(ipPayload) {
+				t.Fatalf("decrypted length too short: %d", len(decrypted))
+			}
+			// Verify inner UDP header (8 bytes)
+			srcPort := uint16(decrypted[0])<<8 | uint16(decrypted[1])
+			dstPort := uint16(decrypted[2])<<8 | uint16(decrypted[3])
+			if srcPort != 1701 || dstPort != 1701 {
+				t.Fatalf("UDP ports mismatch: %d -> %d", srcPort, dstPort)
+			}
+			// Verify L2TP header (6 bytes)
+			tunnelID := uint16(decrypted[10])<<8 | uint16(decrypted[11])
+			sessionID := uint16(decrypted[12])<<8 | uint16(decrypted[13])
+			if tunnelID != 1234 || sessionID != 5678 {
+				t.Fatalf("L2TP IDs mismatch: tunnel=%d session=%d", tunnelID, sessionID)
+			}
+			// Verify PPP protocol (2 bytes: 0x0021)
+			proto := uint16(decrypted[14])<<8 | uint16(decrypted[15])
+			if proto != 0x0021 {
+				t.Fatalf("PPP proto mismatch: 0x%04x", proto)
+			}
+			// Verify IP payload
+			if !bytes.Equal(decrypted[16:], ipPayload) {
+				t.Fatalf("IP payload mismatch: got %s, want %s", decrypted[16:], ipPayload)
+			}
+		})
+	}
+}
+
+func TestESPReplayWindow8MBScale(t *testing.T) {
+	out, in := suites[1].pair(t) // AES-CBC + HMAC-SHA1
+	// Generate base packet
+	pkt1, err := out.Encrypt([]byte("pkt1"), 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := in.Decrypt(pkt1); err != nil {
+		t.Fatalf("pkt1 failed: %v", err)
+	}
+
+	// Advance sequence by 500,000 packets (well within 8MB = 8,388,608 window)
+	out.seq = 500000
+	pktHigh, err := out.Encrypt([]byte("pktHigh"), 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := in.Decrypt(pktHigh); err != nil {
+		t.Fatalf("pktHigh (seq 500001) failed: %v", err)
+	}
+
+	// Now send an out-of-order packet with seq 250,000 (valid within 8MB window)
+	out.seq = 249999
+	pktMiddle, err := out.Encrypt([]byte("pktMiddle"), 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := in.Decrypt(pktMiddle); err != nil {
+		t.Fatalf("pktMiddle (seq 250000) out-of-order failed: %v", err)
+	}
+
+	// Replay of pktMiddle must be rejected
+	if _, _, err := in.Decrypt(pktMiddle); err == nil {
+		t.Fatal("replay of pktMiddle was accepted!")
+	}
+}
+
+func BenchmarkESPEncryptIPPacket(b *testing.B) {
+	s := suites[1] // AES-128
+	enc := bytes.Repeat([]byte{0x11}, s.encLen)
+	auth := bytes.Repeat([]byte{0x22}, s.authLen)
+	out, _ := NewSA(0xAABBCCDD, s.cipher, s.integrity, enc, auth)
+	payload := make([]byte, 1280) // full MTU packet
+
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+	b.ReportAllocs()
+
+	for i := 0; i < b.N; i++ {
+		_, err := out.EncryptIPPacket(1, 1, payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
