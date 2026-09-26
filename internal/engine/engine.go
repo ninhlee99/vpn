@@ -64,12 +64,13 @@ var errAbortedByDisconnect = errors.New("connect aborted: disconnected while neg
 // lost afterwards (the data plane stopped). Everything it had changed is
 // already restored; Connect answers by reconnecting.
 type tunnelDropped struct {
-	cause  error
-	uptime time.Duration
+	cause       error
+	uptime      time.Duration
 	// stale identifies the LNS-side session of the tunnel that was just lost:
 	// when the network died first, we never told the server to close it, and it
 	// would keep the account "already logged in" until its own echo timeout.
-	stale *staleSession
+	stale       *staleSession
+	lastLocalIP net.IP
 }
 
 func (e *tunnelDropped) Error() string {
@@ -87,11 +88,11 @@ type staleSession struct {
 
 // staleTerminateAttempts / staleTerminateGap: the Terminate-Request is
 // unreliable (a data message), so it is sent a few times.
-const staleTerminateAttempts = 3
+const staleTerminateAttempts = 2
 
 var (
-	staleTerminateGap = 300 * time.Millisecond
-	staleSettle       = time.Second // let the LNS tear the session down before we log in again
+	staleTerminateGap = 40 * time.Millisecond
+	staleSettle       = 60 * time.Millisecond // fast non-blocking eviction
 )
 
 // evictStale asks the LNS to end a session of ours that was never closed, by
@@ -187,6 +188,7 @@ func Connect(cfg Config) error {
 		authRejects  int
 		negRetries   int           // first-connect negotiation timeouts retried so far
 		stale        *staleSession // the last dropped tunnel's server-side session, until a new one replaces it
+		lastLocalIP  net.IP        // retain assigned IP address across reconnects
 		blocked      bool          // a kill-switch hold may have left blackhole routes that only we can remove
 	)
 	// A session an earlier run could not close (killed daemon, crash, reboot)
@@ -206,7 +208,7 @@ func Connect(cfg Config) error {
 		// While retries remain, a failed first attempt is recorded as CONNECTING
 		// (not FAILED), so the UI keeps showing progress instead of an alert.
 		quiet := !reconnecting && negRetries < maxNegotiationRetries
-		err := connectOnce(sigCtx, cfg, reconnecting, reconnects, quiet, stale)
+		err := connectOnce(sigCtx, cfg, reconnecting, reconnects, quiet, stale, lastLocalIP)
 		if err == nil {
 			return nil // disconnected on request
 		}
@@ -217,6 +219,9 @@ func Connect(cfg Config) error {
 		case errors.As(err, &dropped):
 			reconnecting = true
 			stale = dropped.stale
+			if dropped.lastLocalIP != nil {
+				lastLocalIP = dropped.lastLocalIP
+			}
 			blocked = blocked || (cfg.KillSwitch && cfg.FullTunnel)
 			reconnects++
 			authRejects = 0
@@ -293,7 +298,7 @@ func finalFailure(cfg Config, ce *connectError) error {
 // neither of which requires root once open, so there's no reason for the
 // process to keep holding root through what's normally the vast majority
 // of a session's lifetime.
-func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int, quiet bool, stale *staleSession) error {
+func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnects int, quiet bool, stale *staleSession, requestedIP net.IP) error {
 	st := &state.State{Phase: state.PhaseConnecting, Profile: cfg.ProfileName, Account: cfg.AccountName, Server: cfg.Server, Reconnecting: reconnecting, Reconnects: reconnects}
 	var connectedAt time.Time
 
@@ -557,7 +562,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		if mru == 0 {
 			mru = 1280
 		}
-		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, Timeout: cfg.Timeout})
+		pppResult, err := ppp.Run(ctx, pppT, ppp.Config{MRU: mru, Username: cfg.AccountName, Password: cfg.Password, RequestedIP: requestedIP, Timeout: cfg.Timeout})
 		if err != nil {
 			l2tpTun.Close()
 			restoreRoutes()
@@ -632,6 +637,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				teardownPartial()
 				return fail("DNS_FAILURE", "capture current DNS configuration", err)
 			}
+			snap.TunIface = dev.Name
 			if err := snap.Apply(dnsServers); err != nil {
 				teardownPartial()
 				return fail("DNS_FAILURE", "apply LNS-provided DNS servers", err)
@@ -739,11 +745,13 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 			}
 			cur := sas.current()
 			vpnlog.Info("ENGINE", "tunnel alive", vpnlog.Fields{
-				"rx_packets": live.rx.Load(), "tx_packets": live.tx.Load(),
-				"idle_s":        int(idle / time.Second),
-				"esp_sa_left_s": int(time.Until(cur.expires) / time.Second),
-				"ike_age_s":     int(mux.current().Age() / time.Second),
-				"uptime_s":      int(time.Since(connectedAt) / time.Second),
+				"uptime":        time.Since(connectedAt).Round(time.Second).String(),
+				"rx_packets":    live.rx.Load(),
+				"tx_packets":    live.tx.Load(),
+				"esp_in_spi":    fmt.Sprintf("%08x", cur.in.SPI),
+				"esp_out_spi":   fmt.Sprintf("%08x", cur.out.SPI),
+				"esp_expires_in": time.Until(cur.expires).Round(time.Second).String(),
+				"ike_age":       mux.current().Age().Round(time.Second).String(),
 			})
 		}
 		if err := watchdog(dpCtx, keepaliveEvery, deadAfter, live, probe, report); err != nil {
@@ -818,7 +826,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 			_ = dropping.Save()
 			vpnlog.Error("ENGINE", "data plane stopped unexpectedly", vpnlog.Fields{"err": pumpErr, "exposure": exposure})
 			pt, ps := l2tpTun.PeerIDs()
-			return &tunnelDropped{cause: pumpErr, uptime: uptime, stale: &staleSession{tunnel: pt, session: ps}}
+			return &tunnelDropped{cause: pumpErr, uptime: uptime, stale: &staleSession{tunnel: pt, session: ps}, lastLocalIP: ipcp.LocalIP}
 		}
 		clearLastSession() // closed properly: nothing left on the server to end
 		_ = state.Clear()
@@ -902,11 +910,44 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMa
 		recvDone.Wait()
 	}()
 
-	// utun -> PPP -> L2TP -> ESP
+	// utun -> Send Queue (buffered) -> ESP send worker
+	sendCh := make(chan []byte, 4096)
+
+	// Worker: Encrypts and writes UDP packets as fast as CPU/socket allows
 	go func() {
+		sends := &failStreak{limit: ioFailureLimit}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case pkt, ok := <-sendCh:
+				if !ok {
+					return
+				}
+				if err := pppT.SendIP(pkt); err != nil {
+					isFatal, logIt := sends.fail(time.Now())
+					if logIt {
+						vpnlog.Error("ENGINE", "send failed — dropping packets until it recovers", vpnlog.Fields{"err": err})
+					}
+					if isFatal {
+						fatal(fmt.Errorf("sending to the server failed for %s: %w", ioFailureLimit, err))
+						return
+					}
+					continue
+				}
+				if sends.n > 0 {
+					vpnlog.Info("ENGINE", "send recovered", vpnlog.Fields{"failed_packets": sends.n})
+					sends.ok()
+				}
+			}
+		}
+	}()
+
+	// Reader: Reads from utun without blocking on network/crypto
+	go func() {
+		defer close(sendCh)
 		buf := make([]byte, utunReadBuf)
 		reads := &failStreak{limit: ioFailureLimit}
-		sends := &failStreak{limit: ioFailureLimit}
 		for {
 			n, err := dev.Read(buf)
 			if err != nil {
@@ -931,20 +972,12 @@ func runDataPlane(ctx context.Context, dev *tun.Device, pppT *pppOverL2TP, lcpMa
 			if n == 0 || buf[0]>>4 != 4 {
 				continue
 			}
-			if err := pppT.SendFrame(ppp.ProtoIP, buf[:n]); err != nil {
-				isFatal, logIt := sends.fail(time.Now())
-				if logIt {
-					vpnlog.Error("ENGINE", "send failed — dropping packets until it recovers", vpnlog.Fields{"err": err})
-				}
-				if isFatal {
-					fatal(fmt.Errorf("sending to the server failed for %s: %w", ioFailureLimit, err))
-					return
-				}
-				continue
-			}
-			if sends.n > 0 {
-				vpnlog.Info("ENGINE", "send recovered", vpnlog.Fields{"failed_packets": sends.n})
-				sends.ok()
+			pkt := make([]byte, n)
+			copy(pkt, buf[:n])
+			select {
+			case sendCh <- pkt:
+			case <-ctx.Done():
+				return
 			}
 		}
 	}()
@@ -1164,8 +1197,8 @@ func killExisting(verbose bool) error {
 			if err := syscall.Kill(st.PID, syscall.SIGTERM); err != nil {
 				return fmt.Errorf("signal running connect process (pid %d): %w", st.PID, err)
 			}
-			for i := 0; i < 50; i++ { // up to ~5s for its own graceful teardown
-				time.Sleep(100 * time.Millisecond)
+			for i := 0; i < 250; i++ { // up to ~5s for its own graceful teardown (fast 20ms polling)
+				time.Sleep(20 * time.Millisecond)
 				cur, err := state.Load()
 				if err == nil && cur.Phase == state.PhaseDisconnected {
 					if verbose {
@@ -1211,8 +1244,10 @@ func Repair() error {
 		return fmt.Errorf("connect (pid %d) is still running — use `vpn disconnect` instead", st.PID)
 	}
 	return privilege.Elevate(func() error {
+		dnsmgr.CleanPersistentSettings()
+		_ = (&dnsmgr.Snapshot{}).Restore()
 		if st.Server == "" {
-			fmt.Println("No recorded server to repair routes for — nothing to do.")
+			fmt.Println("Cleaned any leftover DNS and routes — network is clean.")
 			return state.Clear()
 		}
 		restoreRecorded(st)

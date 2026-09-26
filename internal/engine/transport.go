@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"syscall"
 
@@ -37,9 +38,13 @@ func (t *espTransport) noteDrop(msg string, err error) {
 	}
 	f := vpnlog.Fields{"dropped_total": n}
 	if err != nil {
-		f["err"] = err
+		f["reason"] = err.Error()
 	}
-	vpnlog.Info("ENGINE", msg, f)
+	if err != nil && strings.Contains(err.Error(), "already seen") {
+		vpnlog.Debug("ENGINE", "duplicate packet filtered by anti-replay", f)
+	} else {
+		vpnlog.Warn("ENGINE", msg, f)
+	}
 }
 
 const (
@@ -58,6 +63,17 @@ func (t *espTransport) Send(l2tpMsg []byte) error {
 	payload := append(udpHdr, l2tpMsg...)
 
 	pkt, err := t.sas.current().out.Encrypt(payload, protoUDP)
+	if err != nil {
+		return fmt.Errorf("ESP encrypt: %w", err)
+	}
+	if t.live != nil {
+		t.live.tx.Add(1)
+	}
+	return sendWithRouteRetry(func() error { return t.mux.sendESP(pkt) }, t.repairRoute)
+}
+
+func (t *espTransport) SendIPFast(tunnelID, sessionID uint16, ipPkt []byte) error {
+	pkt, err := t.sas.current().out.EncryptIPPacket(tunnelID, sessionID, ipPkt)
 	if err != nil {
 		return fmt.Errorf("ESP encrypt: %w", err)
 	}
@@ -133,6 +149,16 @@ func (t *espTransport) process(pkt []byte) (msg []byte, ok bool) {
 // data channel.
 type pppOverL2TP struct {
 	tun *l2tp.Tunnel
+}
+
+func (p *pppOverL2TP) SendIP(ipPkt []byte) error {
+	pt, ps := p.tun.PeerIDs()
+	if fast, ok := p.tun.Transport().(interface {
+		SendIPFast(tunnelID, sessionID uint16, ipPkt []byte) error
+	}); ok {
+		return fast.SendIPFast(pt, ps, ipPkt)
+	}
+	return p.SendFrame(ppp.ProtoIP, ipPkt)
 }
 
 func (p *pppOverL2TP) SendFrame(protocol uint16, payload []byte) error {

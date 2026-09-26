@@ -90,7 +90,7 @@ func (s *Session) SendNATKeepalive() error {
 // handleInformational. Call once, right after the first Quick Mode.
 func (s *Session) StartDataPhase(ctx context.Context, events Events) {
 	dp := &dataPlane{
-		espIn:   make(chan []byte, 256),
+		espIn:   make(chan []byte, 32768),
 		done:    make(chan struct{}),
 		events:  events,
 		pending: map[uint32]chan []byte{},

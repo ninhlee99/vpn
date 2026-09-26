@@ -50,6 +50,15 @@ type SA struct {
 	block   cipher.Block
 	newHash func() hash.Hash
 	icvLen  int
+	mac     hash.Hash
+	macBuf  [64]byte
+
+	ivPool [64 * 1024]byte
+	ivPos  int
+
+	encPlainBuf []byte
+	decPlainBuf []byte
+	ivBuf       [16]byte
 
 	// mu serializes Encrypt/Decrypt: several goroutines send on the same SA
 	// (the utun pump, PPP/L2TP control replies), and an unsynchronized
@@ -57,17 +66,27 @@ type SA struct {
 	// the second then dropped by the peer as a replay.
 	mu         sync.Mutex
 	seq        uint32 // outbound: last sequence number sent
-	replaySeen [64]bool
+	replaySeen []bool
 	replayBase uint32
 	replayInit bool
 }
+
+// ReplayWindowSize is the 8MB sliding anti-replay window (8,388,608 packets / ~11 GB in-flight buffer).
+const ReplayWindowSize = 8 * 1024 * 1024
 
 // NewSA builds an SA for the negotiated transforms, rejecting keys whose
 // length doesn't fit them — a mismatch here means the IKE layer and this
 // one disagree about what was negotiated, which must never be papered over
 // by running the wrong cipher.
 func NewSA(spi uint32, c Cipher, i Integrity, encKey, authKey []byte) (*SA, error) {
-	sa := &SA{SPI: spi, Cipher: c, Integrity: i, EncKey: encKey, AuthKey: authKey}
+	sa := &SA{
+		SPI:        spi,
+		Cipher:     c,
+		Integrity:  i,
+		EncKey:     encKey,
+		AuthKey:    authKey,
+		replaySeen: make([]bool, ReplayWindowSize),
+	}
 	var err error
 	switch c {
 	case Cipher3DESCBC:
@@ -92,7 +111,22 @@ func NewSA(spi uint32, c Cipher, i Integrity, encKey, authKey []byte) (*SA, erro
 	if len(authKey) != keyLen {
 		return nil, fmt.Errorf("ESP integrity key is %d bytes, want %d", len(authKey), keyLen)
 	}
+	sa.mac = hmac.New(sa.newHash, sa.AuthKey)
+	sa.ivPos = len(sa.ivPool) // force initial fill
 	return sa, nil
+}
+
+func (sa *SA) getIV(iv []byte) error {
+	blockLen := len(iv)
+	if sa.ivPos+blockLen > len(sa.ivPool) {
+		if _, err := rand.Read(sa.ivPool[:]); err != nil {
+			return err
+		}
+		sa.ivPos = 0
+	}
+	copy(iv, sa.ivPool[sa.ivPos:sa.ivPos+blockLen])
+	sa.ivPos += blockLen
+	return nil
 }
 
 // Encrypt wraps one IP payload (the UDP/1701 L2TP datagram, without its own
@@ -110,8 +144,8 @@ func (sa *SA) Encrypt(payload []byte, nextHeader byte) ([]byte, error) {
 	seq := sa.seq
 
 	blockLen := sa.block.BlockSize()
-	iv := make([]byte, blockLen)
-	if _, err := rand.Read(iv); err != nil {
+	iv := sa.ivBuf[:blockLen]
+	if err := sa.getIV(iv); err != nil {
 		return nil, err
 	}
 
@@ -120,24 +154,95 @@ func (sa *SA) Encrypt(payload []byte, nextHeader byte) ([]byte, error) {
 	// — not security-relevant, just alignment).
 	total := len(payload) + 2 // + pad-length byte + next-header byte
 	padNeeded := (blockLen - (total % blockLen)) % blockLen
-	plain := make([]byte, 0, len(payload)+padNeeded+2)
-	plain = append(plain, payload...)
-	for i := 0; i < padNeeded; i++ {
-		plain = append(plain, byte(i+1))
+	plainLen := len(payload) + padNeeded + 2
+	if cap(sa.encPlainBuf) < plainLen {
+		sa.encPlainBuf = make([]byte, plainLen+2048)
 	}
-	plain = append(plain, byte(padNeeded), nextHeader)
+	plain := sa.encPlainBuf[:plainLen]
+	copy(plain, payload)
+	for i := 0; i < padNeeded; i++ {
+		plain[len(payload)+i] = byte(i + 1)
+	}
+	plain[len(payload)+padNeeded] = byte(padNeeded)
+	plain[len(payload)+padNeeded+1] = nextHeader
 
-	out := make([]byte, 8+blockLen+len(plain)+sa.icvLen)
+	out := make([]byte, 8+blockLen+plainLen+sa.icvLen)
 	binary.BigEndian.PutUint32(out[0:4], sa.SPI)
 	binary.BigEndian.PutUint32(out[4:8], seq)
 	copy(out[8:8+blockLen], iv)
-	body := out[8+blockLen : 8+blockLen+len(plain)]
+	body := out[8+blockLen : 8+blockLen+plainLen]
 	cipher.NewCBCEncrypter(sa.block, iv).CryptBlocks(body, plain)
 
-	icvOffset := 8 + blockLen + len(plain)
-	mac := hmac.New(sa.newHash, sa.AuthKey)
-	mac.Write(out[:icvOffset]) // ICV covers SPI|Seq|IV|ciphertext, RFC 4303
-	copy(out[icvOffset:], mac.Sum(nil)[:sa.icvLen])
+	icvOffset := 8 + blockLen + plainLen
+	sa.mac.Reset()
+	sa.mac.Write(out[:icvOffset]) // ICV covers SPI|Seq|IV|ciphertext, RFC 4303
+	sum := sa.mac.Sum(sa.macBuf[:0])
+	copy(out[icvOffset:], sum[:sa.icvLen])
+	return out, nil
+}
+
+// EncryptIPPacket embeds the inner UDP (8B) + L2TP (6B) + PPP (2B) header directly into the
+// cipher buffer, encrypting in one single pass without heap allocations or slice churn.
+func (sa *SA) EncryptIPPacket(tunnelID, sessionID uint16, ipPkt []byte) ([]byte, error) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if sa.seq == math.MaxUint32 {
+		return nil, fmt.Errorf("ESP sequence number exhausted — SA must be rekeyed")
+	}
+	sa.seq++
+	seq := sa.seq
+
+	blockLen := sa.block.BlockSize()
+	iv := sa.ivBuf[:blockLen]
+	if err := sa.getIV(iv); err != nil {
+		return nil, err
+	}
+
+	payloadLen := 16 + len(ipPkt)
+	total := payloadLen + 2 // + pad-length byte + next-header byte
+	padNeeded := (blockLen - (total % blockLen)) % blockLen
+	plainLen := payloadLen + padNeeded + 2
+	if cap(sa.encPlainBuf) < plainLen {
+		sa.encPlainBuf = make([]byte, plainLen+2048)
+	}
+	plain := sa.encPlainBuf[:plainLen]
+
+	// Inner UDP header (8 bytes): 1701 -> 1701
+	binary.BigEndian.PutUint16(plain[0:2], 1701)
+	binary.BigEndian.PutUint16(plain[2:4], 1701)
+	binary.BigEndian.PutUint16(plain[4:6], uint16(payloadLen))
+	binary.BigEndian.PutUint16(plain[6:8], 0) // checksum 0
+
+	// L2TP header (6 bytes): flags=0x0002, tunnelID, sessionID
+	binary.BigEndian.PutUint16(plain[8:10], 0x0002)
+	binary.BigEndian.PutUint16(plain[10:12], tunnelID)
+	binary.BigEndian.PutUint16(plain[12:14], sessionID)
+
+	// PPP header (2 bytes): ProtoIP 0x0021
+	binary.BigEndian.PutUint16(plain[14:16], 0x0021)
+
+	// IP packet payload
+	copy(plain[16:16+len(ipPkt)], ipPkt)
+
+	for i := 0; i < padNeeded; i++ {
+		plain[payloadLen+i] = byte(i + 1)
+	}
+	plain[payloadLen+padNeeded] = byte(padNeeded)
+	plain[payloadLen+padNeeded+1] = 17 // protoUDP
+
+	outLen := 8 + blockLen + plainLen + sa.icvLen
+	out := make([]byte, outLen)
+	binary.BigEndian.PutUint32(out[0:4], sa.SPI)
+	binary.BigEndian.PutUint32(out[4:8], seq)
+	copy(out[8:8+blockLen], iv)
+	body := out[8+blockLen : 8+blockLen+plainLen]
+	cipher.NewCBCEncrypter(sa.block, iv).CryptBlocks(body, plain)
+
+	icvOffset := 8 + blockLen + plainLen
+	sa.mac.Reset()
+	sa.mac.Write(out[:icvOffset])
+	sum := sa.mac.Sum(sa.macBuf[:0])
+	copy(out[icvOffset:], sum[:sa.icvLen])
 	return out, nil
 }
 
@@ -161,9 +266,10 @@ func (sa *SA) Decrypt(pkt []byte) (payload []byte, nextHeader byte, err error) {
 	}
 
 	icvOffset := len(pkt) - sa.icvLen
-	mac := hmac.New(sa.newHash, sa.AuthKey)
-	mac.Write(pkt[:icvOffset])
-	if !hmac.Equal(mac.Sum(nil)[:sa.icvLen], pkt[icvOffset:]) {
+	sa.mac.Reset()
+	sa.mac.Write(pkt[:icvOffset])
+	sum := sa.mac.Sum(sa.macBuf[:0])
+	if !hmac.Equal(sum[:sa.icvLen], pkt[icvOffset:]) {
 		return nil, 0, fmt.Errorf("ESP ICV verification failed (wrong key, or corrupted/tampered packet)")
 	}
 
@@ -172,7 +278,10 @@ func (sa *SA) Decrypt(pkt []byte) (payload []byte, nextHeader byte, err error) {
 	if len(ciphertext)%blockLen != 0 {
 		return nil, 0, fmt.Errorf("ESP ciphertext length %d not a multiple of block size %d", len(ciphertext), blockLen)
 	}
-	plain := make([]byte, len(ciphertext))
+	if cap(sa.decPlainBuf) < len(ciphertext) {
+		sa.decPlainBuf = make([]byte, len(ciphertext)+2048)
+	}
+	plain := sa.decPlainBuf[:len(ciphertext)]
 	cipher.NewCBCDecrypter(sa.block, iv).CryptBlocks(plain, ciphertext)
 
 	padLen := int(plain[len(plain)-2])
@@ -180,7 +289,9 @@ func (sa *SA) Decrypt(pkt []byte) (payload []byte, nextHeader byte, err error) {
 	if padLen+2 > len(plain) {
 		return nil, 0, fmt.Errorf("ESP padding length %d exceeds plaintext", padLen)
 	}
-	payload = plain[:len(plain)-2-padLen]
+	payloadLen := len(plain) - 2 - padLen
+	payload = make([]byte, payloadLen)
+	copy(payload, plain[:payloadLen])
 	sa.markSeqSeen(seq)
 	return payload, nextHeader, nil
 }
@@ -217,12 +328,10 @@ func (sa *SA) markSeqSeen(seq uint32) {
 	if seq > sa.replayBase {
 		shift := seq - sa.replayBase
 		if shift >= uint32(len(sa.replaySeen)) {
-			sa.replaySeen = [64]bool{}
+			clear(sa.replaySeen)
 		} else {
-			copy(sa.replaySeen[shift:], sa.replaySeen[:])
-			for i := uint32(0); i < shift; i++ {
-				sa.replaySeen[i] = false
-			}
+			copy(sa.replaySeen[shift:], sa.replaySeen[:len(sa.replaySeen)-int(shift)])
+			clear(sa.replaySeen[:shift])
 		}
 		sa.replayBase = seq
 		sa.replaySeen[0] = true

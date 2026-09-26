@@ -260,3 +260,53 @@ func parseTransformBody(body []byte) (Transform, error) {
 	}
 	return t, nil
 }
+
+func (t Transform) String() string {
+	var enc string
+	switch t.Encryption {
+	case Enc3DES, esp3DES:
+		enc = "3des"
+	case EncDES, espDES:
+		enc = "des"
+	case EncAES, espAES:
+		if t.KeyBits > 0 {
+			enc = fmt.Sprintf("aes%d", t.KeyBits)
+		} else {
+			enc = "aes"
+		}
+	default:
+		enc = fmt.Sprintf("enc%d", t.Encryption)
+	}
+
+	var h string
+	switch t.Hash {
+	case HashMD5:
+		h = "md5"
+	case HashSHA1:
+		h = "sha1"
+	case HashSHA256:
+		h = "sha256"
+	default:
+		h = fmt.Sprintf("hash%d", t.Hash)
+	}
+
+	if t.Group == 0 {
+		return fmt.Sprintf("%s-%s", enc, h)
+	}
+
+	var g string
+	switch t.Group {
+	case 1:
+		g = "modp768"
+	case 2:
+		g = "modp1024"
+	case 5:
+		g = "modp1536"
+	case 14:
+		g = "modp2048"
+	default:
+		g = fmt.Sprintf("modp%d", t.Group)
+	}
+
+	return fmt.Sprintf("%s-%s-%s", enc, h, g)
+}

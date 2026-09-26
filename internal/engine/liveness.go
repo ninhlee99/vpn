@@ -11,13 +11,11 @@ import (
 // the server to: an idle tunnel may legitimately hear nothing for a long
 // while, and a dead one looks exactly the same from a blocked read.
 const (
-	// 20s sits under the ~30s minimum UDP mapping timeout of common NATs while
-	// costing a laptop only three tiny packets a minute; deadAfter is three
-	// missed probes. Faster detection of a real change comes from the
-	// kernel's network events (netevents.go), not from a shorter timer.
-	keepaliveEvery = 20 * time.Second // LCP echo + NAT keepalive: keeps NAT mappings alive and provokes a reply
-	deadAfter      = 60 * time.Second // this long without one valid packet from the server = peer gone
-	statsEvery     = 3                // log a "tunnel alive" line every statsEvery keepalive ticks
+	// 10s keeps aggressive NAT mappings alive and detects dead peers within 30s
+	// (3 missed probes), fitting well within standard TCP retransmission timeouts (60-120s).
+	keepaliveEvery = 10 * time.Second // LCP echo + NAT keepalive: keeps NAT mappings alive and provokes a reply
+	deadAfter      = 30 * time.Second // this long without one valid packet from the server = peer gone
+	statsEvery     = 6                // log a "tunnel alive" line every 60s (6 * 10s)
 )
 
 // liveness records what the data plane last heard from the server, so the

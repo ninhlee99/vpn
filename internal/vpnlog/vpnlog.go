@@ -146,6 +146,10 @@ func Info(stage, msg string, f Fields) {
 	l.Printf("[%s] %s%s", stage, msg, f.String())
 }
 
+func Warn(stage, msg string, f Fields) {
+	current().Printf("[%s] WARN %s%s", stage, msg, f.String())
+}
+
 func Error(stage, msg string, f Fields) {
 	current().Printf("[%s] ERROR %s%s", stage, msg, f.String())
 }

@@ -616,10 +616,11 @@ final class VPNManager: ObservableObject {
             // which handles that itself) — see engine.Repair's doc comment.
             Self.run(cli, ["disconnect"])
             Self.run(cli, ["repair"])
-            // Give the server time to flush the RADIUS/L2TP session.
-            Thread.sleep(forTimeInterval: 1.2)
-            Self.launchConnect(cli: cli, profileName: profileName) {
-                Task { @MainActor in self.endIntent(id) }
+            // Give the server time to flush the RADIUS/L2TP session asynchronously without blocking the queue thread.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.8) {
+                Self.launchConnect(cli: cli, profileName: profileName) {
+                    Task { @MainActor in self.endIntent(id) }
+                }
             }
         }
     }
@@ -1698,6 +1699,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate, NSW
 
     // Closing the window must not quit: the app carries on in the menu bar.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // When quitting the app, gracefully disconnect and restore routes if connected
+        let isConnected = MainActor.assumeIsolated { VPNManager.shared.isConnected }
+        if isConnected {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/local/bin/vpn")
+            p.arguments = ["disconnect"]
+            try? p.run()
+            p.waitUntilExit()
+        }
+    }
 
     func showMainWindow() {
         if popover.isShown { popover.performClose(nil) }

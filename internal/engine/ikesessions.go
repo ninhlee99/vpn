@@ -35,7 +35,7 @@ type ikeSessions struct {
 }
 
 func newIKESessions(ctx context.Context) *ikeSessions {
-	return &ikeSessions{ctx: ctx, in: make(chan []byte, 256)}
+	return &ikeSessions{ctx: ctx, in: make(chan []byte, 2048)}
 }
 
 // add makes s the session outbound traffic leaves on (and rekeys use), and

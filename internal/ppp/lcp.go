@@ -140,7 +140,11 @@ func HandleOpenedLCP(t Transport, payload []byte, magic uint32) {
 	switch pkt.Code {
 	case CodeEchoRequest:
 		err := t.SendFrame(ProtoLCP, EchoReply(pkt, magic).Marshal())
-		vpnlog.Debug(stage, "answered LCP Echo-Request", vpnlog.Fields{"id": pkt.Identifier, "err": err})
+		if err != nil {
+			vpnlog.Error(stage, "failed to answer LCP Echo-Request", vpnlog.Fields{"id": pkt.Identifier, "err": err})
+		} else {
+			vpnlog.Debug(stage, "answered LCP Echo-Request (keepalive OK)", vpnlog.Fields{"id": pkt.Identifier})
+		}
 	case CodeConfigureRequest:
 		reply := ControlPacket{Code: CodeConfigureAck, Identifier: pkt.Identifier, Data: pkt.Data}
 		_ = t.SendFrame(ProtoLCP, reply.Marshal())
