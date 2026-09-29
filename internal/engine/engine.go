@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -669,15 +670,9 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				st.Warnings = append(st.Warnings, w)
 				vpnlog.Error("ENGINE", w, nil)
 			}
-			// Put the resolvers that actually answer through the tunnel first,
-			// so one dead server cannot stall every lookup.
-			ranked, reachable := dnsmgr.RankByReachability(dnsmgr.PrioritizeDNSServers(dnsServers), func(ip string) bool {
-				return dnsmgr.ProbeServer(net.JoinHostPort(ip, "53"), dnsProbeTimeout)
-			})
-			if len(ranked) > 0 && reachable == 0 {
-				st.Warnings = append(st.Warnings, warnDNSUnreachable)
-				vpnlog.Error("ENGINE", warnDNSUnreachable, vpnlog.Fields{"servers": ranked})
-			}
+			// Reachability can only be measured once the data plane is pumping
+			// packets (see rerankDNS below), so start from the static order.
+			ranked := dnsmgr.PrioritizeDNSServers(dnsServers)
 			if err := snap.Apply(ranked); err != nil {
 				teardownPartial()
 				return fail("DNS_FAILURE", "apply LNS-provided DNS servers", err)
@@ -817,9 +812,43 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		go watchNetwork(dpCtx, events, localIPOfSession, live, probe, kickRoutes, drop, localAddrPresent)
 	}
 
+	// With packets flowing, check which pushed resolvers really answer through
+	// the tunnel and put those first, so one dead server cannot stall every
+	// lookup. Tied to dpCtx and awaited before teardown like the other
+	// tunnel-lifetime goroutines.
+	rerankDone := make(chan struct{})
+	go func() {
+		defer close(rerankDone)
+		if dnsSnap == nil {
+			return
+		}
+		order := dnsmgr.PrioritizeDNSServers(dnsServerStrings(ipcp))
+		probeDNS := func(ip string) bool {
+			for i := 0; i < 2 && dpCtx.Err() == nil; i++ { // the first packets can race the pump
+				if dnsmgr.ProbeServer(net.JoinHostPort(ip, "53"), dnsProbeTimeout) {
+					return true
+				}
+			}
+			return false
+		}
+		changed, reachable, err := rerankDNS(order, probeDNS, func(r []string) error {
+			return privilege.Elevate(func() error { return dnsSnap.Apply(r) })
+		})
+		switch {
+		case dpCtx.Err() != nil:
+		case err != nil:
+			vpnlog.Error("ENGINE", "could not re-order DNS servers", vpnlog.Fields{"err": err})
+		case reachable == 0:
+			vpnlog.Error("ENGINE", warnDNSUnreachable, vpnlog.Fields{"servers": order})
+		case changed:
+			vpnlog.Info("ENGINE", "DNS re-ordered: reachable servers first", vpnlog.Fields{"reachable": reachable})
+		}
+	}()
+
 	pumpErr := runDataPlane(dpCtx, dev, pppT, lcpMagic, dropCh)
 	stopDP()
 	<-watchDone
+	<-rerankDone
 	uptime := time.Since(connectedAt)
 
 	// Tear down on the way out no matter why the pump stopped (signal or
@@ -892,6 +921,17 @@ const dnsProbeTimeout = 1500 * time.Millisecond
 // warnDNSUnreachable is surfaced when no pushed DNS server answered through
 // the tunnel: the VPN is up but name resolution will likely fail.
 const warnDNSUnreachable = "none of the VPN's DNS servers answered a test query: lookups may fail while connected"
+
+// rerankDNS probes servers and, when reachability changes their order, hands
+// the new order to apply. Nothing is dropped and nothing is applied when no
+// server answers (the static order stays).
+func rerankDNS(servers []string, probe func(string) bool, apply func([]string) error) (changed bool, reachable int, err error) {
+	ranked, reachable := dnsmgr.RankByReachability(servers, probe)
+	if reachable == 0 || slices.Equal(ranked, servers) {
+		return false, reachable, nil
+	}
+	return true, reachable, apply(ranked)
+}
 
 // networkOverlapWarnings flags a VPN-assigned address or DNS server that lies
 // inside the physical network's own subnet — the classic cause of a "connected

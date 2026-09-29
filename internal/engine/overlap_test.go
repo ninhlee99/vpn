@@ -18,3 +18,24 @@ func TestNetworkOverlapWarnings(t *testing.T) {
 		t.Fatalf("unknown interface must not warn, got %q", w)
 	}
 }
+
+func TestRerankDNS(t *testing.T) {
+	alive := func(a map[string]bool) func(string) bool { return func(s string) bool { return a[s] } }
+	var applied []string
+	apply := func(r []string) error { applied = r; return nil }
+
+	// A dead first server: the answering one moves up and is applied.
+	changed, n, err := rerankDNS([]string{"10.0.0.1", "8.8.8.8"}, alive(map[string]bool{"8.8.8.8": true}), apply)
+	if err != nil || !changed || n != 1 || len(applied) != 2 || applied[0] != "8.8.8.8" {
+		t.Fatalf("changed=%v n=%d err=%v applied=%v", changed, n, err, applied)
+	}
+	// Already in a good order: nothing applied.
+	applied = nil
+	if changed, _, _ := rerankDNS([]string{"8.8.8.8", "10.0.0.1"}, alive(map[string]bool{"8.8.8.8": true}), apply); changed || applied != nil {
+		t.Fatalf("re-applied an unchanged order: %v", applied)
+	}
+	// Nothing answers: keep the static order, apply nothing.
+	if changed, n, _ := rerankDNS([]string{"10.0.0.1"}, alive(nil), apply); changed || n != 0 || applied != nil {
+		t.Fatalf("applied with no reachable server: %v", applied)
+	}
+}
