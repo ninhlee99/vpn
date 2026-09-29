@@ -92,34 +92,34 @@ func TestP2PInterfaceArgs(t *testing.T) {
 		{
 			name:     "valid peer provided",
 			iface:    "utun0",
-			local:    "192.168.100.205",
-			peer:     "192.168.100.1",
+			local:    "192.0.2.205",
+			peer:     "192.0.2.1",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 192.168.100.1 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 192.0.2.1 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer is empty string",
 			iface:    "utun0",
-			local:    "192.168.100.205",
+			local:    "192.0.2.205",
 			peer:     "",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer is 0.0.0.0",
 			iface:    "utun0",
-			local:    "192.168.100.205",
+			local:    "192.0.2.205",
 			peer:     "0.0.0.0",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer equals local IP",
 			iface:    "utun0",
-			local:    "192.168.100.205",
-			peer:     "192.168.100.205",
+			local:    "192.0.2.205",
+			peer:     "192.0.2.205",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "local is defaultPeerIP and peer empty",
@@ -142,9 +142,9 @@ func TestP2PInterfaceArgs(t *testing.T) {
 }
 
 func TestParseRouteGet(t *testing.T) {
-	out := "   route to: default\ndestination: default\n       mask: default\n    gateway: 10.20.200.1\n  interface: en0\n"
+	out := "   route to: default\ndestination: default\n       mask: default\n    gateway: 198.51.100.1\n  interface: en0\n"
 	iface, gw := parseRouteGet(out)
-	if iface != "en0" || gw != "10.20.200.1" {
+	if iface != "en0" || gw != "198.51.100.1" {
 		t.Fatalf("got %q %q", iface, gw)
 	}
 	// An interface-only default (stale tunnel route) has no gateway line.
@@ -172,9 +172,9 @@ func TestUsableDefault(t *testing.T) {
 }
 
 func TestParseScutilGlobalIPv4(t *testing.T) {
-	out := "<dictionary> {\n  PrimaryInterface : en0\n  PrimaryService : ABC\n  Router : 10.20.200.1\n}\n"
+	out := "<dictionary> {\n  PrimaryInterface : en0\n  PrimaryService : ABC\n  Router : 198.51.100.1\n}\n"
 	iface, gw := parseScutilGlobalIPv4(out)
-	if iface != "en0" || gw != "10.20.200.1" {
+	if iface != "en0" || gw != "198.51.100.1" {
 		t.Fatalf("got %q %q", iface, gw)
 	}
 }
@@ -182,11 +182,11 @@ func TestParseScutilGlobalIPv4(t *testing.T) {
 func TestParseNetstatDefault(t *testing.T) {
 	out := `Destination        Gateway            Flags               Netif Expire
 default            link#20            UCSIg               utun5
-default            192.168.100.1      UGScg                 en0
+default            192.0.2.1      UGScg                 en0
 0/1                utun5              USc                 utun5
 `
 	iface, gw := parseNetstatDefault(out)
-	if iface != "en0" || gw != "192.168.100.1" {
+	if iface != "en0" || gw != "192.0.2.1" {
 		t.Fatalf("got %q %q", iface, gw)
 	}
 	if i, g := parseNetstatDefault("default link#4 UCS en0\n"); i != "" || g != "" {
@@ -195,14 +195,14 @@ default            192.168.100.1      UGScg                 en0
 }
 
 func TestOverlaps(t *testing.T) {
-	_, lan, _ := net.ParseCIDR("192.168.100.0/24")
-	if !overlaps([]*net.IPNet{lan}, net.ParseIP("192.168.100.205")) {
+	_, lan, _ := net.ParseCIDR("192.0.2.0/24")
+	if !overlaps([]*net.IPNet{lan}, net.ParseIP("192.0.2.205")) {
 		t.Error("VPN address inside the LAN not detected")
 	}
 	if overlaps([]*net.IPNet{lan}, net.ParseIP("10.64.64.64")) {
 		t.Error("address outside the LAN flagged")
 	}
-	if overlaps(nil, net.ParseIP("192.168.100.1")) {
+	if overlaps(nil, net.ParseIP("192.0.2.1")) {
 		t.Error("no networks must never overlap")
 	}
 }

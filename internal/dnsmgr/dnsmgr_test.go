@@ -19,13 +19,13 @@ func TestIsPrivateIPv4(t *testing.T) {
 		{"172.31.255.254", true},
 		{"172.32.0.1", false},
 		{"192.168.1.1", true},
-		{"192.168.100.1", true},
+		{"192.168.0.53", true},
 		{"100.64.0.1", true},
 		{"100.127.255.254", true},
 		{"100.128.0.1", false},
 		{"8.8.8.8", false},
 		{"1.1.1.1", false},
-		{"118.238.201.33", false},
+		{"198.51.100.33", false},
 		{"invalid-ip", false},
 		{"", false},
 	}
@@ -47,13 +47,13 @@ func TestPrioritizeDNSServers(t *testing.T) {
 	}{
 		{
 			name:    "public before private",
-			servers: []string{"118.238.201.33", "192.168.100.1"},
-			want:    []string{"192.168.100.1", "118.238.201.33"},
+			servers: []string{"198.51.100.33", "192.168.0.53"},
+			want:    []string{"192.168.0.53", "198.51.100.33"},
 		},
 		{
 			name:    "already prioritized with duplicates and invalid",
-			servers: []string{"192.168.100.1", "10.0.0.1", "118.238.201.33", "192.168.100.1", "", "0.0.0.0", "8.8.8.8"},
-			want:    []string{"192.168.100.1", "10.0.0.1", "118.238.201.33", "8.8.8.8"},
+			servers: []string{"192.168.0.53", "10.0.0.1", "198.51.100.33", "192.168.0.53", "", "0.0.0.0", "8.8.8.8"},
+			want:    []string{"192.168.0.53", "10.0.0.1", "198.51.100.33", "8.8.8.8"},
 		},
 		{
 			name:    "all private",
@@ -86,17 +86,17 @@ func TestPrioritizeDNSServers(t *testing.T) {
 }
 
 func TestCleanServersKeepsCallerOrder(t *testing.T) {
-	got := cleanServers([]string{"118.238.201.33", " 192.168.100.1 ", "", "0.0.0.0", "118.238.201.33"})
-	want := []string{"118.238.201.33", "192.168.100.1"}
+	got := cleanServers([]string{"198.51.100.33", " 192.168.0.53 ", "", "0.0.0.0", "198.51.100.33"})
+	want := []string{"198.51.100.33", "192.168.0.53"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("cleanServers = %v, want %v", got, want)
 	}
 }
 
 func TestApplyScript(t *testing.T) {
-	got := applyScript([]string{"118.238.201.33", "192.168.100.1"}, "utun5")
+	got := applyScript([]string{"198.51.100.33", "192.168.0.53"}, "utun5")
 	for _, want := range []string{
-		"d.add ServerAddresses * 118.238.201.33 192.168.100.1\n",
+		"d.add ServerAddresses * 198.51.100.33 192.168.0.53\n",
 		"d.add InterfaceName utun5\n",
 		"set " + dnsStateKey + "\n",
 	} {
@@ -122,9 +122,9 @@ func TestRestoreScriptTouchesOnlyOwnKey(t *testing.T) {
 }
 
 func TestRankByReachability(t *testing.T) {
-	alive := map[string]bool{"118.238.201.33": true, "8.8.8.8": true}
-	got, n := RankByReachability([]string{"192.168.100.1", "118.238.201.33", "8.8.8.8"}, func(s string) bool { return alive[s] })
-	want := []string{"118.238.201.33", "8.8.8.8", "192.168.100.1"}
+	alive := map[string]bool{"198.51.100.33": true, "8.8.8.8": true}
+	got, n := RankByReachability([]string{"192.168.0.53", "198.51.100.33", "8.8.8.8"}, func(s string) bool { return alive[s] })
+	want := []string{"198.51.100.33", "8.8.8.8", "192.168.0.53"}
 	if !reflect.DeepEqual(got, want) || n != 2 {
 		t.Fatalf("got %v (%d reachable), want %v (2)", got, n, want)
 	}
@@ -165,11 +165,11 @@ func TestProbeServer(t *testing.T) {
 }
 
 func TestIPv4Script(t *testing.T) {
-	got := ipv4Script("utun5", "192.168.100.205", "10.64.64.64")
+	got := ipv4Script("utun5", "192.0.2.205", "192.0.2.1")
 	for _, want := range []string{
 		"d.add InterfaceName utun5\n",
-		"d.add Addresses * 192.168.100.205\n",
-		"d.add DestAddresses * 10.64.64.64\n",
+		"d.add Addresses * 192.0.2.205\n",
+		"d.add DestAddresses * 192.0.2.1\n",
 		"set " + ipv4StateKey + "\n",
 	} {
 		if !strings.Contains(got, want) {
@@ -185,5 +185,23 @@ func TestIPv4Script(t *testing.T) {
 	}
 	if strings.Contains(ipv4Script("utun5", "10.0.0.1", "bogus"), "DestAddresses") {
 		t.Error("invalid peer published")
+	}
+}
+
+// Regression guard for the macOS "connected but no internet, and none after
+// disconnect" bug: an earlier build overwrote State:/Network/Global/IPv4 with
+// a bogus Router (the interface name) and deleted the key on restore, leaving
+// the machine without a default gateway. Nothing this package publishes may
+// ever touch configd's Global keys.
+func TestNeverTouchesGlobalKeys(t *testing.T) {
+	scripts := map[string]string{
+		"apply":   applyScript([]string{"198.51.100.33"}, "utun5"),
+		"ipv4":    ipv4Script("utun5", "192.0.2.205", "192.0.2.1"),
+		"restore": restoreScript(),
+	}
+	for name, s := range scripts {
+		if strings.Contains(s, "Network/Global") {
+			t.Errorf("%s script touches a Global key:\n%s", name, s)
+		}
 	}
 }

@@ -8,8 +8,8 @@ import (
 )
 
 func TestNegotiatedIPCPPointToPointPeer(t *testing.T) {
-	local := net.ParseIP("192.168.100.205")
-	peer := net.ParseIP("192.168.100.1")
+	local := net.ParseIP("192.0.2.205")
+	peer := net.ParseIP("192.0.2.1")
 	zero := net.ParseIP("0.0.0.0")
 
 	tests := []struct {
@@ -55,7 +55,7 @@ func TestNegotiatedIPCPPointToPointPeer(t *testing.T) {
 
 func TestApplyPeerOptionIgnoresZeroIP(t *testing.T) {
 	n := &NegotiatedIPCP{
-		LocalIP: net.ParseIP("192.168.100.205"),
+		LocalIP: net.ParseIP("192.0.2.205"),
 	}
 
 	// LNS sends IP-Address = 0.0.0.0 in its Configure-Request
@@ -65,7 +65,7 @@ func TestApplyPeerOptionIgnoresZeroIP(t *testing.T) {
 	}
 
 	// LNS sends valid inside IP
-	validPeer := net.ParseIP("192.168.100.1")
+	validPeer := net.ParseIP("192.0.2.1")
 	n.ApplyPeerOption(IPv4Option(IPCPOptIPAddress, validPeer))
 	if !n.PeerIP.Equal(validPeer) {
 		t.Fatalf("PeerIP = %v, want %v", n.PeerIP, validPeer)
@@ -163,7 +163,7 @@ func TestRunIPCPWithPeerZeroIP(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	assigned := net.ParseIP("192.168.100.205")
+	assigned := net.ParseIP("192.0.2.205")
 	// LNS sends 0.0.0.0 as its own IP
 	peer := newFakeIPCPPeer(assigned, net.IPv4zero)
 
