@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -211,5 +212,27 @@ func TestEnsureDefaultRouteNoGatewayIsNoop(t *testing.T) {
 	// repair's zero-value snapshot has no captured gateway: must not touch routes.
 	if err := (&Snapshot{}).EnsureDefaultRoute(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Only a genuinely absent default may be re-created: any existing default —
+// however unusual — belongs to the network the machine is on now.
+func TestDefaultMissing(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"lookup failed", "", errors.New("exit status 1"), true},
+		{"empty answer", "", nil, true},
+		{"healthy default", "gateway: 192.0.2.1\ninterface: en0\n", nil, false},
+		{"stale interface-only default", "interface: utun5\n", nil, false},
+		{"another VPN's default", "gateway: 198.51.100.1\ninterface: utun3\n", nil, false},
+		{"link# gateway", "gateway: link#6\ninterface: en0\n", nil, false},
+	} {
+		if got := defaultMissing(c.out, c.err); got != c.want {
+			t.Errorf("%s: defaultMissing = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

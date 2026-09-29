@@ -170,25 +170,36 @@ func overlaps(nets []*net.IPNet, ip net.IP) bool {
 }
 
 // EnsureDefaultRoute is the post-restore safety net: if, after everything
-// this client added is gone, the machine has no usable physical default
-// route (something reaped it while the tunnel was up), put back the one
-// captured before connecting. A no-op when the default is healthy or the
-// snapshot never captured a gateway (repair's zero-value snapshot).
+// this client added is gone, the machine has no default route at all
+// (something reaped it while the tunnel was up), put back the one captured
+// before connecting. It never touches an existing default — even one on a
+// different interface, a link# gateway or another VPN's tunnel — because the
+// captured gateway may belong to a network the machine has since left. A
+// no-op when the snapshot never captured a gateway (repair's zero-value
+// snapshot).
 func (s *Snapshot) EnsureDefaultRoute() error {
 	if s.DefaultGateway == "" {
 		return nil
 	}
-	if out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output(); err == nil {
-		if iface, gw := parseRouteGet(string(out)); usableDefault(iface, gw) {
-			return nil
-		}
+	out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output()
+	if !defaultMissing(string(out), err) {
+		return nil
 	}
-	// A stale interface-only default would make "add" fail with File exists.
-	_ = exec.Command(sysbin.Route, "-n", "delete", "default").Run()
 	if out, err := exec.Command(sysbin.Route, "-n", "add", "default", s.DefaultGateway).CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") {
 		return fmt.Errorf("restore default route via %s: %w (%s)", s.DefaultGateway, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// defaultMissing reports whether `route -n get default` found no default
+// route at all: a failed lookup ("not in table") or an answer naming neither
+// an interface nor a gateway.
+func defaultMissing(out string, err error) bool {
+	if err != nil {
+		return true
+	}
+	iface, gw := parseRouteGet(out)
+	return iface == "" && gw == ""
 }
 
 // ProtectServer adds an explicit host route to the VPN server through the
