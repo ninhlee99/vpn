@@ -1,8 +1,11 @@
 package dnsmgr
 
 import (
+	"net"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsPrivateIPv4(t *testing.T) {
@@ -79,5 +82,84 @@ func TestPrioritizeDNSServers(t *testing.T) {
 				t.Errorf("PrioritizeDNSServers(%v) = %v, want %v", tt.servers, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCleanServersKeepsCallerOrder(t *testing.T) {
+	got := cleanServers([]string{"118.238.201.33", " 192.168.100.1 ", "", "0.0.0.0", "118.238.201.33"})
+	want := []string{"118.238.201.33", "192.168.100.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanServers = %v, want %v", got, want)
+	}
+}
+
+func TestApplyScript(t *testing.T) {
+	got := applyScript([]string{"118.238.201.33", "192.168.100.1"}, "utun5")
+	for _, want := range []string{
+		"d.add ServerAddresses * 118.238.201.33 192.168.100.1\n",
+		"d.add InterfaceName utun5\n",
+		"set " + dnsStateKey + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(applyScript([]string{"1.1.1.1"}, ""), "InterfaceName") {
+		t.Error("InterfaceName written without a tunnel interface")
+	}
+}
+
+// Restore must only ever touch our own key: State:/Network/Global/DNS belongs
+// to configd, and deleting it left machines with no DNS after disconnect.
+func TestRestoreScriptTouchesOnlyOwnKey(t *testing.T) {
+	got := restoreScript()
+	if strings.Contains(got, "Global") {
+		t.Fatalf("restore touches a configd-owned key:\n%s", got)
+	}
+	if got != "remove "+dnsStateKey+"\n" {
+		t.Fatalf("unexpected restore script %q", got)
+	}
+}
+
+func TestRankByReachability(t *testing.T) {
+	alive := map[string]bool{"118.238.201.33": true, "8.8.8.8": true}
+	got, n := RankByReachability([]string{"192.168.100.1", "118.238.201.33", "8.8.8.8"}, func(s string) bool { return alive[s] })
+	want := []string{"118.238.201.33", "8.8.8.8", "192.168.100.1"}
+	if !reflect.DeepEqual(got, want) || n != 2 {
+		t.Fatalf("got %v (%d reachable), want %v (2)", got, n, want)
+	}
+	// Nothing answers: order is kept, nothing is dropped.
+	got, n = RankByReachability([]string{"10.0.0.1", "10.0.0.2"}, func(string) bool { return false })
+	if !reflect.DeepEqual(got, []string{"10.0.0.1", "10.0.0.2"}) || n != 0 {
+		t.Fatalf("all-dead case: got %v (%d)", got, n)
+	}
+}
+
+// fakeDNS answers one UDP query by echoing it with QR set, or stays silent.
+func fakeDNS(t *testing.T, reply bool) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil || !reply {
+			return
+		}
+		buf[2] |= 0x80
+		_, _ = pc.WriteTo(buf[:n], addr)
+	}()
+	return pc.LocalAddr().String()
+}
+
+func TestProbeServer(t *testing.T) {
+	if !ProbeServer(fakeDNS(t, true), time.Second) {
+		t.Error("responding server reported dead")
+	}
+	if ProbeServer(fakeDNS(t, false), 200*time.Millisecond) {
+		t.Error("silent server reported alive")
 	}
 }

@@ -7,6 +7,7 @@ package sysbin
 
 const (
 	Route        = "/sbin/route"
+	Netstat      = "/usr/sbin/netstat"
 	Ifconfig     = "/sbin/ifconfig"
 	Ping         = "/sbin/ping"
 	Networksetup = "/usr/sbin/networksetup"

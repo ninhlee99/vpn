@@ -8,6 +8,7 @@ package routing
 import (
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"strings"
 	"time"
@@ -44,25 +45,150 @@ var ipv6RejectNets = []string{"::", "8000::"}
 
 // Capture reads the current default route. It must be called before any
 // other function in this package changes anything.
+//
+// `route get default` is the primary source, but it can answer with no
+// usable gateway — an interface-only default (e.g. a stale utun route left
+// by a crashed run) or a link# gateway. Rather than fail the connect (which
+// used to leave the user with no network until repair), fall back to what
+// configd itself publishes (State:/Network/Global/IPv4), then to the
+// routing table. A candidate is only accepted if its gateway is a real IP
+// and its interface is not a tunnel.
 func Capture() (*Snapshot, error) {
-	out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output()
-	if err != nil {
-		return nil, fmt.Errorf("read default route: %w", err)
+	if out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output(); err == nil {
+		if iface, gw := parseRouteGet(string(out)); usableDefault(iface, gw) {
+			return &Snapshot{DefaultInterface: iface, DefaultGateway: gw}, nil
+		}
 	}
-	s := &Snapshot{}
-	for _, line := range strings.Split(string(out), "\n") {
+	if out, err := scutilShow("State:/Network/Global/IPv4"); err == nil {
+		if iface, gw := parseScutilGlobalIPv4(out); usableDefault(iface, gw) {
+			return &Snapshot{DefaultInterface: iface, DefaultGateway: gw}, nil
+		}
+	}
+	if out, err := exec.Command(sysbin.Netstat, "-rn", "-f", "inet").Output(); err == nil {
+		if iface, gw := parseNetstatDefault(string(out)); usableDefault(iface, gw) {
+			return &Snapshot{DefaultInterface: iface, DefaultGateway: gw}, nil
+		}
+	}
+	return nil, fmt.Errorf("could not determine current default gateway")
+}
+
+func scutilShow(key string) (string, error) {
+	cmd := exec.Command(sysbin.Scutil)
+	cmd.Stdin = strings.NewReader("show " + key + "\n")
+	out, err := cmd.Output()
+	return string(out), err
+}
+
+// usableDefault reports whether (iface, gw) can serve as the physical
+// default: a literal IP gateway on a non-tunnel interface.
+func usableDefault(iface, gw string) bool {
+	return iface != "" && net.ParseIP(gw) != nil && !isTunnelInterface(iface)
+}
+
+func isTunnelInterface(iface string) bool {
+	for _, p := range []string{"utun", "ppp", "ipsec", "gif", "stf"} {
+		if strings.HasPrefix(iface, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRouteGet(out string) (iface, gw string) {
+	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "interface:"):
-			s.DefaultInterface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
 		case strings.HasPrefix(line, "gateway:"):
-			s.DefaultGateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
+			gw = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
 		}
 	}
-	if s.DefaultGateway == "" {
-		return nil, fmt.Errorf("could not determine current default gateway")
+	return
+}
+
+func parseScutilGlobalIPv4(out string) (iface, gw string) {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.SplitN(strings.TrimSpace(line), ":", 2)
+		if len(f) != 2 {
+			continue
+		}
+		switch strings.TrimSpace(f[0]) {
+		case "PrimaryInterface":
+			iface = strings.TrimSpace(f[1])
+		case "Router":
+			gw = strings.TrimSpace(f[1])
+		}
 	}
-	return s, nil
+	return
+}
+
+// parseNetstatDefault picks the first non-tunnel `default` row of
+// `netstat -rn -f inet`: "default  <gateway>  <flags>  <netif>".
+func parseNetstatDefault(out string) (iface, gw string) {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[0] != "default" {
+			continue
+		}
+		if usableDefault(f[3], f[1]) {
+			return f[3], f[1]
+		}
+	}
+	return
+}
+
+// OverlapsLocalNetwork reports whether ip falls inside a subnet configured
+// on the physical interface iface. A VPN address or DNS server in the same
+// subnet as the LAN would be reached on-link (a /24 beats the tunnel's /1),
+// bypassing the tunnel.
+func OverlapsLocalNetwork(iface string, ip net.IP) bool {
+	ni, err := net.InterfaceByName(iface)
+	if err != nil {
+		return false
+	}
+	addrs, err := ni.Addrs()
+	if err != nil {
+		return false
+	}
+	var nets []*net.IPNet
+	for _, a := range addrs {
+		if n, ok := a.(*net.IPNet); ok {
+			nets = append(nets, n)
+		}
+	}
+	return overlaps(nets, ip)
+}
+
+func overlaps(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// EnsureDefaultRoute is the post-restore safety net: if, after everything
+// this client added is gone, the machine has no usable physical default
+// route (something reaped it while the tunnel was up), put back the one
+// captured before connecting. A no-op when the default is healthy or the
+// snapshot never captured a gateway (repair's zero-value snapshot).
+func (s *Snapshot) EnsureDefaultRoute() error {
+	if s.DefaultGateway == "" {
+		return nil
+	}
+	if out, err := exec.Command(sysbin.Route, "-n", "get", "default").Output(); err == nil {
+		if iface, gw := parseRouteGet(string(out)); usableDefault(iface, gw) {
+			return nil
+		}
+	}
+	// A stale interface-only default would make "add" fail with File exists.
+	_ = exec.Command(sysbin.Route, "-n", "delete", "default").Run()
+	if out, err := exec.Command(sysbin.Route, "-n", "add", "default", s.DefaultGateway).CombinedOutput(); err != nil && !strings.Contains(string(out), "File exists") {
+		return fmt.Errorf("restore default route via %s: %w (%s)", s.DefaultGateway, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ProtectServer adds an explicit host route to the VPN server through the
@@ -358,6 +484,11 @@ func (s *Snapshot) restore(removeOverrides bool) error {
 	if s.hostRouteAdded && s.VPNServerIP != "" {
 		if out, err := exec.Command(sysbin.Route, "-n", "delete", "-host", s.VPNServerIP).CombinedOutput(); err != nil && !strings.Contains(string(out), "not in table") {
 			errs = append(errs, fmt.Sprintf("remove VPN server host route: %v (%s)", err, strings.TrimSpace(string(out))))
+		}
+	}
+	if removeOverrides {
+		if err := s.EnsureDefaultRoute(); err != nil {
+			errs = append(errs, err.Error())
 		}
 	}
 	if len(errs) > 0 {

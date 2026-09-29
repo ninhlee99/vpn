@@ -646,7 +646,12 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 		}
 
 		dnsServers := dnsServerStrings(ipcp)
-		if len(dnsServers) > 0 && !cfg.FullTunnel {
+		// Route the pushed DNS servers into the tunnel in full-tunnel mode too:
+		// a host route is more specific than any on-link LAN prefix, so a
+		// server that happens to sit inside the local subnet (a VPN handing
+		// out 192.168.x.1 on a 192.168.x.0/24 Wi-Fi) is still reached through
+		// the tunnel instead of being answered — or not — by the local router.
+		if len(dnsServers) > 0 {
 			if err := rtSnapshot.RouteHostsViaTunnel(dnsServers, dev.Name); err != nil {
 				teardownPartial()
 				return fail("ROUTE_FAILURE", "route pushed DNS servers through the tunnel", err)
@@ -659,7 +664,20 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				snap = &dnsmgr.Snapshot{Service: service}
 			}
 			snap.TunIface = dev.Name
-			if err := snap.Apply(dnsServers); err != nil {
+			for _, w := range networkOverlapWarnings(rtSnapshot.DefaultInterface, ipcp.LocalIP, dnsServers) {
+				st.Warnings = append(st.Warnings, w)
+				vpnlog.Error("ENGINE", w, nil)
+			}
+			// Put the resolvers that actually answer through the tunnel first,
+			// so one dead server cannot stall every lookup.
+			ranked, reachable := dnsmgr.RankByReachability(dnsmgr.PrioritizeDNSServers(dnsServers), func(ip string) bool {
+				return dnsmgr.ProbeServer(net.JoinHostPort(ip, "53"), dnsProbeTimeout)
+			})
+			if len(ranked) > 0 && reachable == 0 {
+				st.Warnings = append(st.Warnings, warnDNSUnreachable)
+				vpnlog.Error("ENGINE", warnDNSUnreachable, vpnlog.Fields{"servers": ranked})
+			}
+			if err := snap.Apply(ranked); err != nil {
 				teardownPartial()
 				return fail("DNS_FAILURE", "apply LNS-provided DNS servers", err)
 			}
@@ -867,6 +885,29 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 
 // warnNoPushedDNS is surfaced by connect/status when the LNS assigned no DNS
 // servers under full tunnel (see Connect).
+// dnsProbeTimeout bounds each pushed-DNS reachability probe at connect.
+const dnsProbeTimeout = 1500 * time.Millisecond
+
+// warnDNSUnreachable is surfaced when no pushed DNS server answered through
+// the tunnel: the VPN is up but name resolution will likely fail.
+const warnDNSUnreachable = "none of the VPN's DNS servers answered a test query: lookups may fail while connected"
+
+// networkOverlapWarnings flags a VPN-assigned address or DNS server that lies
+// inside the physical network's own subnet — the classic cause of a "connected
+// but no internet" tunnel.
+func networkOverlapWarnings(physIface string, local net.IP, dns []string) []string {
+	var w []string
+	if local != nil && routing.OverlapsLocalNetwork(physIface, local) {
+		w = append(w, fmt.Sprintf("VPN address %s is inside the local network on %s: the subnets overlap and some traffic may not use the tunnel", local, physIface))
+	}
+	for _, d := range dns {
+		if ip := net.ParseIP(d); ip != nil && routing.OverlapsLocalNetwork(physIface, ip) {
+			w = append(w, fmt.Sprintf("VPN DNS server %s is inside the local network on %s: it is routed through the tunnel explicitly", d, physIface))
+		}
+	}
+	return w
+}
+
 const warnNoPushedDNS = "VPN server pushed no DNS servers: DNS lookups keep using this network's resolvers, and any on the local network bypass the VPN"
 
 // newESPSA turns one direction of Quick Mode's result into the data-plane

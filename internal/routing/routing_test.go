@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"net"
 	"strings"
 	"testing"
 )
@@ -137,5 +138,78 @@ func TestP2PInterfaceArgs(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.wantArgs)
 			}
 		})
+	}
+}
+
+func TestParseRouteGet(t *testing.T) {
+	out := "   route to: default\ndestination: default\n       mask: default\n    gateway: 10.20.200.1\n  interface: en0\n"
+	iface, gw := parseRouteGet(out)
+	if iface != "en0" || gw != "10.20.200.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+	// An interface-only default (stale tunnel route) has no gateway line.
+	iface, gw = parseRouteGet("destination: default\n  interface: utun5\n")
+	if iface != "utun5" || gw != "" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+}
+
+func TestUsableDefault(t *testing.T) {
+	for _, c := range []struct {
+		iface, gw string
+		want      bool
+	}{
+		{"en0", "192.168.1.1", true},
+		{"en0", "link#6", false},
+		{"en0", "", false},
+		{"utun5", "10.64.64.64", false},
+		{"", "192.168.1.1", false},
+	} {
+		if got := usableDefault(c.iface, c.gw); got != c.want {
+			t.Errorf("usableDefault(%q,%q) = %v, want %v", c.iface, c.gw, got, c.want)
+		}
+	}
+}
+
+func TestParseScutilGlobalIPv4(t *testing.T) {
+	out := "<dictionary> {\n  PrimaryInterface : en0\n  PrimaryService : ABC\n  Router : 10.20.200.1\n}\n"
+	iface, gw := parseScutilGlobalIPv4(out)
+	if iface != "en0" || gw != "10.20.200.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+}
+
+func TestParseNetstatDefault(t *testing.T) {
+	out := `Destination        Gateway            Flags               Netif Expire
+default            link#20            UCSIg               utun5
+default            192.168.100.1      UGScg                 en0
+0/1                utun5              USc                 utun5
+`
+	iface, gw := parseNetstatDefault(out)
+	if iface != "en0" || gw != "192.168.100.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+	if i, g := parseNetstatDefault("default link#4 UCS en0\n"); i != "" || g != "" {
+		t.Fatalf("link# gateway accepted: %q %q", i, g)
+	}
+}
+
+func TestOverlaps(t *testing.T) {
+	_, lan, _ := net.ParseCIDR("192.168.100.0/24")
+	if !overlaps([]*net.IPNet{lan}, net.ParseIP("192.168.100.205")) {
+		t.Error("VPN address inside the LAN not detected")
+	}
+	if overlaps([]*net.IPNet{lan}, net.ParseIP("10.64.64.64")) {
+		t.Error("address outside the LAN flagged")
+	}
+	if overlaps(nil, net.ParseIP("192.168.100.1")) {
+		t.Error("no networks must never overlap")
+	}
+}
+
+func TestEnsureDefaultRouteNoGatewayIsNoop(t *testing.T) {
+	// repair's zero-value snapshot has no captured gateway: must not touch routes.
+	if err := (&Snapshot{}).EnsureDefaultRoute(); err != nil {
+		t.Fatal(err)
 	}
 }
