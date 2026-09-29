@@ -11,9 +11,13 @@ fi
 
 echo "🚀 [1/3] Làm sạch và biên dịch Menu Bar App + Go CLI (Universal: Intel x86_64 + ARM64)..."
 sudo rm -rf ./build
+# Version shown in the app footer and `vpn version`: the latest git tag, unless APP_VERSION is set.
+APP_VERSION="${APP_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+APP_VERSION="${APP_VERSION:-dev}"
+export APP_VERSION
 ./build.sh
-GOOS=darwin GOARCH=arm64 go build -o ./build/vpn-arm64 ./cmd/vpn
-GOOS=darwin GOARCH=amd64 go build -o ./build/vpn-amd64 ./cmd/vpn
+GOOS=darwin GOARCH=arm64 go build -ldflags "-X main.version=v$APP_VERSION" -o ./build/vpn-arm64 ./cmd/vpn
+GOOS=darwin GOARCH=amd64 go build -ldflags "-X main.version=v$APP_VERSION" -o ./build/vpn-amd64 ./cmd/vpn
 lipo -create ./build/vpn-arm64 ./build/vpn-amd64 -output ./build/vpn
 
 echo "📦 [2/3] Cài đặt CLI Engine (/usr/local/bin/vpn)..."
