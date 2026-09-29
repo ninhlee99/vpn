@@ -116,7 +116,7 @@ func TestRestoreScriptTouchesOnlyOwnKey(t *testing.T) {
 	if strings.Contains(got, "Global") {
 		t.Fatalf("restore touches a configd-owned key:\n%s", got)
 	}
-	if got != "remove "+dnsStateKey+"\n" {
+	if got != "remove "+dnsStateKey+"\nremove "+ipv4StateKey+"\n" {
 		t.Fatalf("unexpected restore script %q", got)
 	}
 }
@@ -161,5 +161,29 @@ func TestProbeServer(t *testing.T) {
 	}
 	if ProbeServer(fakeDNS(t, false), 200*time.Millisecond) {
 		t.Error("silent server reported alive")
+	}
+}
+
+func TestIPv4Script(t *testing.T) {
+	got := ipv4Script("utun5", "192.168.100.205", "10.64.64.64")
+	for _, want := range []string{
+		"d.add InterfaceName utun5\n",
+		"d.add Addresses * 192.168.100.205\n",
+		"d.add DestAddresses * 10.64.64.64\n",
+		"set " + ipv4StateKey + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Never a Router: that is what could make configd adopt this service as the default route.
+	if strings.Contains(got, "Router") {
+		t.Fatalf("IPv4 registration must not carry a Router:\n%s", got)
+	}
+	if ipv4Script("", "10.0.0.1", "10.0.0.2") != "" || ipv4Script("utun5", "bad", "10.0.0.2") != "" {
+		t.Error("script produced without a tunnel interface or valid local address")
+	}
+	if strings.Contains(ipv4Script("utun5", "10.0.0.1", "bogus"), "DestAddresses") {
+		t.Error("invalid peer published")
 	}
 }

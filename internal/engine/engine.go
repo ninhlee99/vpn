@@ -664,6 +664,7 @@ func connectOnce(sigCtx context.Context, cfg Config, reconnecting bool, reconnec
 				snap = &dnsmgr.Snapshot{Service: service}
 			}
 			snap.TunIface = dev.Name
+			snap.LocalIP, snap.PeerIP = ipcp.LocalIP.String(), peer.String()
 			for _, w := range networkOverlapWarnings(rtSnapshot.DefaultInterface, ipcp.LocalIP, dnsServers) {
 				st.Warnings = append(st.Warnings, w)
 				vpnlog.Error("ENGINE", w, nil)
