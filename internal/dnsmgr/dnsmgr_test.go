@@ -1,8 +1,11 @@
 package dnsmgr
 
 import (
+	"net"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsPrivateIPv4(t *testing.T) {
@@ -16,13 +19,13 @@ func TestIsPrivateIPv4(t *testing.T) {
 		{"172.31.255.254", true},
 		{"172.32.0.1", false},
 		{"192.168.1.1", true},
-		{"192.168.100.1", true},
+		{"192.168.0.53", true},
 		{"100.64.0.1", true},
 		{"100.127.255.254", true},
 		{"100.128.0.1", false},
 		{"8.8.8.8", false},
 		{"1.1.1.1", false},
-		{"118.238.201.33", false},
+		{"198.51.100.33", false},
 		{"invalid-ip", false},
 		{"", false},
 	}
@@ -44,13 +47,13 @@ func TestPrioritizeDNSServers(t *testing.T) {
 	}{
 		{
 			name:    "public before private",
-			servers: []string{"118.238.201.33", "192.168.100.1"},
-			want:    []string{"192.168.100.1", "118.238.201.33"},
+			servers: []string{"198.51.100.33", "192.168.0.53"},
+			want:    []string{"192.168.0.53", "198.51.100.33"},
 		},
 		{
 			name:    "already prioritized with duplicates and invalid",
-			servers: []string{"192.168.100.1", "10.0.0.1", "118.238.201.33", "192.168.100.1", "", "0.0.0.0", "8.8.8.8"},
-			want:    []string{"192.168.100.1", "10.0.0.1", "118.238.201.33", "8.8.8.8"},
+			servers: []string{"192.168.0.53", "10.0.0.1", "198.51.100.33", "192.168.0.53", "", "0.0.0.0", "8.8.8.8"},
+			want:    []string{"192.168.0.53", "10.0.0.1", "198.51.100.33", "8.8.8.8"},
 		},
 		{
 			name:    "all private",
@@ -79,5 +82,126 @@ func TestPrioritizeDNSServers(t *testing.T) {
 				t.Errorf("PrioritizeDNSServers(%v) = %v, want %v", tt.servers, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCleanServersKeepsCallerOrder(t *testing.T) {
+	got := cleanServers([]string{"198.51.100.33", " 192.168.0.53 ", "", "0.0.0.0", "198.51.100.33"})
+	want := []string{"198.51.100.33", "192.168.0.53"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanServers = %v, want %v", got, want)
+	}
+}
+
+func TestApplyScript(t *testing.T) {
+	got := applyScript([]string{"198.51.100.33", "192.168.0.53"}, "utun5")
+	for _, want := range []string{
+		"d.add ServerAddresses * 198.51.100.33 192.168.0.53\n",
+		"d.add InterfaceName utun5\n",
+		"set " + dnsStateKey + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("script missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(applyScript([]string{"1.1.1.1"}, ""), "InterfaceName") {
+		t.Error("InterfaceName written without a tunnel interface")
+	}
+}
+
+// Restore must only ever touch our own key: State:/Network/Global/DNS belongs
+// to configd, and deleting it left machines with no DNS after disconnect.
+func TestRestoreScriptTouchesOnlyOwnKey(t *testing.T) {
+	got := restoreScript()
+	if strings.Contains(got, "Global") {
+		t.Fatalf("restore touches a configd-owned key:\n%s", got)
+	}
+	if got != "remove "+dnsStateKey+"\nremove "+ipv4StateKey+"\n" {
+		t.Fatalf("unexpected restore script %q", got)
+	}
+}
+
+func TestRankByReachability(t *testing.T) {
+	alive := map[string]bool{"198.51.100.33": true, "8.8.8.8": true}
+	got, n := RankByReachability([]string{"192.168.0.53", "198.51.100.33", "8.8.8.8"}, func(s string) bool { return alive[s] })
+	want := []string{"198.51.100.33", "8.8.8.8", "192.168.0.53"}
+	if !reflect.DeepEqual(got, want) || n != 2 {
+		t.Fatalf("got %v (%d reachable), want %v (2)", got, n, want)
+	}
+	// Nothing answers: order is kept, nothing is dropped.
+	got, n = RankByReachability([]string{"10.0.0.1", "10.0.0.2"}, func(string) bool { return false })
+	if !reflect.DeepEqual(got, []string{"10.0.0.1", "10.0.0.2"}) || n != 0 {
+		t.Fatalf("all-dead case: got %v (%d)", got, n)
+	}
+}
+
+// fakeDNS answers one UDP query by echoing it with QR set, or stays silent.
+func fakeDNS(t *testing.T, reply bool) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 512)
+		n, addr, err := pc.ReadFrom(buf)
+		if err != nil || !reply {
+			return
+		}
+		buf[2] |= 0x80
+		_, _ = pc.WriteTo(buf[:n], addr)
+	}()
+	return pc.LocalAddr().String()
+}
+
+func TestProbeServer(t *testing.T) {
+	if !ProbeServer(fakeDNS(t, true), time.Second) {
+		t.Error("responding server reported dead")
+	}
+	if ProbeServer(fakeDNS(t, false), 200*time.Millisecond) {
+		t.Error("silent server reported alive")
+	}
+}
+
+func TestIPv4Script(t *testing.T) {
+	got := ipv4Script("utun5", "192.0.2.205", "192.0.2.1")
+	for _, want := range []string{
+		"d.add InterfaceName utun5\n",
+		"d.add Addresses * 192.0.2.205\n",
+		"d.add DestAddresses * 192.0.2.1\n",
+		"set " + ipv4StateKey + "\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// Never a Router: that is what could make configd adopt this service as the default route.
+	if strings.Contains(got, "Router") {
+		t.Fatalf("IPv4 registration must not carry a Router:\n%s", got)
+	}
+	if ipv4Script("", "10.0.0.1", "10.0.0.2") != "" || ipv4Script("utun5", "bad", "10.0.0.2") != "" {
+		t.Error("script produced without a tunnel interface or valid local address")
+	}
+	if strings.Contains(ipv4Script("utun5", "10.0.0.1", "bogus"), "DestAddresses") {
+		t.Error("invalid peer published")
+	}
+}
+
+// Regression guard for the macOS "connected but no internet, and none after
+// disconnect" bug: an earlier build overwrote State:/Network/Global/IPv4 with
+// a bogus Router (the interface name) and deleted the key on restore, leaving
+// the machine without a default gateway. Nothing this package publishes may
+// ever touch configd's Global keys.
+func TestNeverTouchesGlobalKeys(t *testing.T) {
+	scripts := map[string]string{
+		"apply":   applyScript([]string{"198.51.100.33"}, "utun5"),
+		"ipv4":    ipv4Script("utun5", "192.0.2.205", "192.0.2.1"),
+		"restore": restoreScript(),
+	}
+	for name, s := range scripts {
+		if strings.Contains(s, "Network/Global") {
+			t.Errorf("%s script touches a Global key:\n%s", name, s)
+		}
 	}
 }

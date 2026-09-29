@@ -1,6 +1,8 @@
 package routing
 
 import (
+	"errors"
+	"net"
 	"strings"
 	"testing"
 )
@@ -91,34 +93,34 @@ func TestP2PInterfaceArgs(t *testing.T) {
 		{
 			name:     "valid peer provided",
 			iface:    "utun0",
-			local:    "192.168.100.205",
-			peer:     "192.168.100.1",
+			local:    "192.0.2.205",
+			peer:     "192.0.2.1",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 192.168.100.1 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 192.0.2.1 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer is empty string",
 			iface:    "utun0",
-			local:    "192.168.100.205",
+			local:    "192.0.2.205",
 			peer:     "",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer is 0.0.0.0",
 			iface:    "utun0",
-			local:    "192.168.100.205",
+			local:    "192.0.2.205",
 			peer:     "0.0.0.0",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "peer equals local IP",
 			iface:    "utun0",
-			local:    "192.168.100.205",
-			peer:     "192.168.100.205",
+			local:    "192.0.2.205",
+			peer:     "192.0.2.205",
 			mtu:      1400,
-			wantArgs: "utun0 inet 192.168.100.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
+			wantArgs: "utun0 inet 192.0.2.205 10.64.64.64 netmask 255.255.255.255 mtu 1400 up",
 		},
 		{
 			name:     "local is defaultPeerIP and peer empty",
@@ -137,5 +139,100 @@ func TestP2PInterfaceArgs(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.wantArgs)
 			}
 		})
+	}
+}
+
+func TestParseRouteGet(t *testing.T) {
+	out := "   route to: default\ndestination: default\n       mask: default\n    gateway: 198.51.100.1\n  interface: en0\n"
+	iface, gw := parseRouteGet(out)
+	if iface != "en0" || gw != "198.51.100.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+	// An interface-only default (stale tunnel route) has no gateway line.
+	iface, gw = parseRouteGet("destination: default\n  interface: utun5\n")
+	if iface != "utun5" || gw != "" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+}
+
+func TestUsableDefault(t *testing.T) {
+	for _, c := range []struct {
+		iface, gw string
+		want      bool
+	}{
+		{"en0", "192.168.1.1", true},
+		{"en0", "link#6", false},
+		{"en0", "", false},
+		{"utun5", "10.64.64.64", false},
+		{"", "192.168.1.1", false},
+	} {
+		if got := usableDefault(c.iface, c.gw); got != c.want {
+			t.Errorf("usableDefault(%q,%q) = %v, want %v", c.iface, c.gw, got, c.want)
+		}
+	}
+}
+
+func TestParseScutilGlobalIPv4(t *testing.T) {
+	out := "<dictionary> {\n  PrimaryInterface : en0\n  PrimaryService : ABC\n  Router : 198.51.100.1\n}\n"
+	iface, gw := parseScutilGlobalIPv4(out)
+	if iface != "en0" || gw != "198.51.100.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+}
+
+func TestParseNetstatDefault(t *testing.T) {
+	out := `Destination        Gateway            Flags               Netif Expire
+default            link#20            UCSIg               utun5
+default            192.0.2.1      UGScg                 en0
+0/1                utun5              USc                 utun5
+`
+	iface, gw := parseNetstatDefault(out)
+	if iface != "en0" || gw != "192.0.2.1" {
+		t.Fatalf("got %q %q", iface, gw)
+	}
+	if i, g := parseNetstatDefault("default link#4 UCS en0\n"); i != "" || g != "" {
+		t.Fatalf("link# gateway accepted: %q %q", i, g)
+	}
+}
+
+func TestOverlaps(t *testing.T) {
+	_, lan, _ := net.ParseCIDR("192.0.2.0/24")
+	if !overlaps([]*net.IPNet{lan}, net.ParseIP("192.0.2.205")) {
+		t.Error("VPN address inside the LAN not detected")
+	}
+	if overlaps([]*net.IPNet{lan}, net.ParseIP("10.64.64.64")) {
+		t.Error("address outside the LAN flagged")
+	}
+	if overlaps(nil, net.ParseIP("192.0.2.1")) {
+		t.Error("no networks must never overlap")
+	}
+}
+
+func TestEnsureDefaultRouteNoGatewayIsNoop(t *testing.T) {
+	// repair's zero-value snapshot has no captured gateway: must not touch routes.
+	if err := (&Snapshot{}).EnsureDefaultRoute(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Only a genuinely absent default may be re-created: any existing default —
+// however unusual — belongs to the network the machine is on now.
+func TestDefaultMissing(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		out  string
+		err  error
+		want bool
+	}{
+		{"lookup failed", "", errors.New("exit status 1"), true},
+		{"empty answer", "", nil, true},
+		{"healthy default", "gateway: 192.0.2.1\ninterface: en0\n", nil, false},
+		{"stale interface-only default", "interface: utun5\n", nil, false},
+		{"another VPN's default", "gateway: 198.51.100.1\ninterface: utun3\n", nil, false},
+		{"link# gateway", "gateway: link#6\ninterface: en0\n", nil, false},
+	} {
+		if got := defaultMissing(c.out, c.err); got != c.want {
+			t.Errorf("%s: defaultMissing = %v, want %v", c.name, got, c.want)
+		}
 	}
 }
